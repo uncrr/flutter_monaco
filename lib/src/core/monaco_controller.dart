@@ -13,6 +13,9 @@ import 'package:flutter_monaco/src/platform/platform_webview.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wf;
 import 'package:webview_windows/webview_windows.dart' as ww;
 
+/// A callback function that provides completion items for a given
+/// [CompletionRequest]. It should return a [Future] that resolves to a
+/// [CompletionList].
 typedef CompletionProvider = Future<CompletionList> Function(
   CompletionRequest request,
 );

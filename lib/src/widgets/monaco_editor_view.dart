@@ -64,6 +64,7 @@ enum _ConnectionState {
 /// )
 /// ```
 class MonacoEditor extends StatefulWidget {
+  /// Creates a new [MonacoEditor] widget.
   const MonacoEditor({
     super.key,
     this.controller,
@@ -150,6 +151,8 @@ class MonacoEditor extends StatefulWidget {
 
   /// Callbacks invoked when the editor gains or loses focus.
   final VoidCallback? onFocus;
+
+  /// A callback invoked when the editor loses focus.
   final VoidCallback? onBlur;
 
   /// A callback that provides live statistics from the editor, such as
@@ -183,6 +186,7 @@ class MonacoEditor extends StatefulWidget {
   /// Optional constraints for the editor container.
   final BoxConstraints? constraints;
 
+  /// Creates the mutable state for this widget.
   @override
   State<MonacoEditor> createState() => _MonacoEditorState();
 }

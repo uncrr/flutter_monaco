@@ -12,6 +12,8 @@ class MonacoAssets {
   static const String _cacheSubDir = 'monaco_editor_cache';
   static const String _htmlFileName = 'index.html';
   static const String _relativePath = 'min/vs';
+
+  /// The version of the Monaco Editor assets embedded in the package.
   static const String monacoVersion = '0.52.2';
 
   static Completer<void>? _initCompleter;

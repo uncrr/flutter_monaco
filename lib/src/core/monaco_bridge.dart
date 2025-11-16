@@ -13,7 +13,11 @@ class MonacoBridge extends ChangeNotifier {
   PlatformWebViewController? _webViewController;
 
   // --- State Management ---
+  /// A completer that notifies when the Monaco editor is initialized and ready.
   final Completer<void> onReady = Completer<void>();
+
+  /// A [ValueNotifier] that provides real-time statistics from the editor,
+  /// such as line count, character count, and selection details.
   final ValueNotifier<LiveStats> liveStats =
       ValueNotifier(LiveStats.defaults());
 
@@ -21,11 +25,17 @@ class MonacoBridge extends ChangeNotifier {
   final List<void Function(Map<String, dynamic>)> _rawListeners = [];
 
   // --- Lifecycle and WebView Integration ---
+  /// Attaches the underlying [PlatformWebViewController] to this bridge,
+  /// enabling communication with the editor.
   void attachWebView(PlatformWebViewController controller) {
     _webViewController = controller;
     debugPrint('[MonacoBridge] WebView controller attached.');
   }
 
+  /// Handles incoming messages from the JavaScript side of the editor.
+  ///
+  /// This method processes raw messages, decodes them if necessary, and
+  /// routes them to the appropriate handlers.
   void handleJavaScriptMessage(dynamic message) {
     // Keep platform-agnostic by handling various message types
     final String msg;

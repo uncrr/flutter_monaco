@@ -10,6 +10,7 @@ import 'package:flutter_monaco/flutter_monaco.dart';
 /// This is an optional utility for desktop apps that frequently switch routes
 /// or windows. Place it near your editor once you have the controller.
 class MonacoFocusGuard extends StatefulWidget {
+  /// Creates a [MonacoFocusGuard] widget.
   const MonacoFocusGuard({
     super.key,
     required this.controller,
@@ -17,8 +18,18 @@ class MonacoFocusGuard extends StatefulWidget {
     this.ensureAttempts = 3,
   });
 
+  /// The [MonacoController] for the editor that needs focus management.
   final MonacoController controller;
+
+  /// An optional [RouteObserver] to listen for route changes.
+  ///
+  /// If provided, the guard will re-focus the editor when the current route
+  /// becomes visible again (e.g., after a `pop`).
   final RouteObserver<PageRoute<dynamic>>? routeObserver;
+
+  /// The number of times to attempt to focus the editor.
+  ///
+  /// Defaults to 3 attempts.
   final int ensureAttempts;
 
   @override

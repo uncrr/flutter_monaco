@@ -6,61 +6,84 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart' as wf;
 import 'package:webview_windows/webview_windows.dart' as ww;
 
-/// Unified interface for both webview_flutter and webview_windows
+/// A unified, platform-agnostic interface for controlling a WebView.
+///
+/// This abstract class provides a common API for interacting with the
+/// underlying WebView, whether it's `webview_flutter` on mobile and macOS
+/// or `webview_windows` on Windows. This allows the rest of the application
+/// to remain platform-independent.
 abstract class PlatformWebViewController {
-  /// Execute JavaScript code without expecting a return value
+  /// Executes the given JavaScript [script] in the WebView.
+  ///
+  /// This method does not return a result from the script.
   Future<Object?> runJavaScript(String script);
 
-  /// Execute JavaScript and return the result
+  /// Executes the given JavaScript [script] and returns its result.
+  ///
+  /// The result is decoded from JSON if possible.
   Future<Object?> runJavaScriptReturningResult(String script);
 
-  /// Add a JavaScript channel for communication between JS and Flutter
+  /// Adds a JavaScript channel named [name] that can be used by JavaScript
+  /// code to post messages to the Flutter application.
+  ///
+  /// The [onMessage] callback is invoked when a message is received.
   Future<Object?> addJavaScriptChannel(
     String name,
     void Function(String) onMessage,
   );
 
-  /// Remove a JavaScript channel
+  /// Removes a previously added JavaScript channel named [name].
   Future<Object?> removeJavaScriptChannel(String name);
 
-  /// Clean up resources
+  /// Disposes the controller and releases any associated resources.
   void dispose();
 }
 
-/// Flutter WebView implementation (for non-Windows platforms)
+/// A [PlatformWebViewController] implementation for `webview_flutter`.
+///
+/// This controller is used on Android, iOS, and macOS.
 class FlutterWebViewController implements PlatformWebViewController {
+  /// Creates a new `webview_flutter` controller.
   FlutterWebViewController() {
     _controller = wf.WebViewController();
   }
 
   late final wf.WebViewController _controller;
   bool _disposed = false;
+
+  /// The underlying [wf.WebViewController] from the `webview_flutter` package.
   wf.WebViewController get flutterController => _controller;
 
+  /// Sets the JavaScript mode for the WebView.
   Future<Object?> setJavaScriptMode() async {
     await _controller.setJavaScriptMode(wf.JavaScriptMode.unrestricted);
     return null;
   }
 
+  /// Sets the background color of the WebView.
   Future<Object?> setBackgroundColor(Color color) async {
     await _controller.setBackgroundColor(color);
     return null;
   }
 
+  /// Loads a Flutter asset into the WebView.
   Future<Object?> loadFlutterAsset(String asset) async {
     await _controller.loadFlutterAsset(asset);
     return null;
   }
 
+  /// Loads a local file into the WebView.
   Future<Object?> loadFile(String path) async {
     await _controller.loadFile(path);
     return null;
   }
 
+  /// Sets the navigation delegate for the WebView.
   void setNavigationDelegate(wf.NavigationDelegate delegate) {
     _controller.setNavigationDelegate(delegate);
   }
 
+  /// Sets a callback to be invoked when a JavaScript console message is logged.
   Future<void> setOnConsoleMessage(
     void Function(wf.JavaScriptConsoleMessage) onConsoleMessage,
   ) async {
@@ -116,8 +139,12 @@ class FlutterWebViewController implements PlatformWebViewController {
   }
 }
 
-/// Windows WebView implementation with better message handling
+/// A [PlatformWebViewController] implementation for `webview_windows`.
+///
+/// This controller is used on the Windows platform and wraps the
+/// `WebviewController` from the `webview_windows` package.
 class WindowsWebViewController implements PlatformWebViewController {
+  /// Creates a new `webview_windows` controller.
   WindowsWebViewController() {
     _controller = ww.WebviewController();
   }
@@ -128,8 +155,12 @@ class WindowsWebViewController implements PlatformWebViewController {
   bool _isInitialized = false;
   bool _disposed = false;
 
+  /// The underlying [ww.WebviewController] from the `webview_windows` package.
   ww.WebviewController get windowsController => _controller;
 
+  /// Initializes the WebView2 environment and the underlying controller.
+  ///
+  /// This must be called before any other methods.
   Future<void> initialize() async {
     if (_isInitialized) return;
 
@@ -180,6 +211,7 @@ class WindowsWebViewController implements PlatformWebViewController {
     });
   }
 
+  /// Loads the given HTML string into the WebView.
   Future<void> loadHtmlString(String html, {String? baseUrl}) async {
     debugPrint(
       '[WindowsWebViewController] Loading HTML string (length: ${html.length})',
@@ -187,6 +219,7 @@ class WindowsWebViewController implements PlatformWebViewController {
     await _controller.loadStringContent(html);
   }
 
+  /// Loads the specified URL into the WebView.
   Future<void> loadUrl(String url) async {
     debugPrint('[WindowsWebViewController] Loading URL: $url');
     await _controller.loadUrl(url);
@@ -271,8 +304,13 @@ class WindowsWebViewController implements PlatformWebViewController {
   }
 }
 
-/// Factory for creating platform-specific controllers
+/// A factory for creating the appropriate [PlatformWebViewController] for the
+/// current operating system.
 class PlatformWebViewFactory {
+  /// Creates and returns a [PlatformWebViewController].
+  ///
+  /// This will be a [WindowsWebViewController] on Windows and a
+  /// [FlutterWebViewController] on all other platforms.
   static PlatformWebViewController createController() {
     if (Platform.isWindows) {
       return WindowsWebViewController();
