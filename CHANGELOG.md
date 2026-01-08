@@ -3,6 +3,10 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-01-08
+### Fixed
+- Publish workflow now uses GitHub OIDC via the official Dart publish workflow.
+
 ## [1.2.0] - 2026-01-08
 ### Added
 - `MonacoAction` registry with comprehensive Monaco 0.54.0 action IDs for type-safe `executeAction` calls.

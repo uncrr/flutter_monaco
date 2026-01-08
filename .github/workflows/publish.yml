@@ -9,26 +9,29 @@ on:
       tag:
         description: "Tag to publish (flutter_monaco-vX.Y.Z)"
         required: true
-
-permissions:
-  id-token: write
-  contents: read
+        type: string
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_dispatch'
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    permissions:
+      id-token: write
+      contents: read
+
+  publish-manual:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout (tag push)
-        if: github.event_name != 'workflow_dispatch'
-        uses: actions/checkout@v4
-      - name: Checkout (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
       - name: Validate tag
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
+          TAG="${{ inputs.tag }}"
           case "$TAG" in
             flutter_monaco-v*) ;;
             *)
@@ -37,16 +40,10 @@ jobs:
               ;;
           esac
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
+        uses: flutter-actions/setup-flutter@54feb1e258158303e041b9eaf89314dcfbf6d38a
       - name: Pub get
-        run: flutter pub get
-      - name: Publish (OIDC)
-        if: github.event_name != 'workflow_dispatch'
-        run: flutter pub publish --force
+        run: dart pub get
       - name: Publish (token)
-        if: github.event_name == 'workflow_dispatch'
         env:
           PUB_DEV_TOKEN: ${{ secrets.PUB_DEV_TOKEN }}
           PUB_TOKEN: ${{ secrets.PUB_DEV_TOKEN }}
@@ -55,4 +52,4 @@ jobs:
             echo "PUB_DEV_TOKEN is required for manual workflow_dispatch."
             exit 1
           fi
-          flutter pub publish --force
+          dart pub publish -f
