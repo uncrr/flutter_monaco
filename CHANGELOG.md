@@ -3,6 +3,19 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-08
+### Added
+- `MonacoAction` registry with comprehensive Monaco 0.54.0 action IDs for type-safe `executeAction` calls.
+- Test utilities for platform WebView and controller bootstrapping (`PlatformWebViewController`, `MonacoController.createForTesting`).
+
+### Changed
+- Unknown language/theme IDs now default to `markdown` and `vsDark` respectively.
+- Controller bootstrapping and WebView initialization now use a unified platform adapter with safer lifecycle handling.
+
+### Fixed
+- `executeAction` now tries `editor.getAction(id).run()` first, then falls back to `trigger` for broader action support.
+- Asset extraction now reports incomplete copies and resets initialization state after failures.
+
 ## [1.1.1] - 2025-11-16
 ### Changed
 - Bundled Monaco Editor updated to **v0.54.0** (latest stable drop from Microsoft). Existing apps automatically pick up the new assets on next launch.

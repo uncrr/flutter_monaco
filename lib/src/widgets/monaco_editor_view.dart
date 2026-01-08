@@ -68,6 +68,7 @@ class MonacoEditor extends StatefulWidget {
   const MonacoEditor({
     super.key,
     this.controller,
+    this.controllerFactory,
     this.initialValue,
     this.options = const EditorOptions(),
     this.initialSelection,
@@ -95,6 +96,11 @@ class MonacoEditor extends StatefulWidget {
 
   /// {@macro flutter_monaco.editor.controller}
   final MonacoController? controller;
+
+  /// Test-only hook to supply a controller factory when this widget
+  /// owns the controller lifecycle.
+  @visibleForTesting
+  final Future<MonacoController> Function()? controllerFactory;
 
   /// {@macro flutter_monaco.editor.initialValue}
   final String? initialValue;
@@ -213,6 +219,9 @@ class _MonacoEditorState extends State<MonacoEditor> {
   /// Content sequence number for race condition prevention.
   int _contentSeq = 0;
 
+  /// Bootstrap sequence number to ignore stale async work.
+  int _bootstrapSeq = 0;
+
   /// Timer for debouncing content changes.
   Timer? _contentDebounceTimer;
 
@@ -251,10 +260,15 @@ class _MonacoEditorState extends State<MonacoEditor> {
 
     // If options change, apply them to the existing controller.
     if (widget.options != oldWidget.options) {
-      _controller!.updateOptions(widget.options);
+      _ignoreAsync(_controller!.updateOptions(widget.options));
       // Explicitly update theme and language as they require separate bridge calls.
-      _controller!.setTheme(widget.options.theme);
-      _controller!.setLanguage(widget.options.language);
+      _ignoreAsync(_controller!.setTheme(widget.options.theme));
+      _ignoreAsync(_controller!.setLanguage(widget.options.language));
+    }
+
+    if (widget.backgroundColor != oldWidget.backgroundColor &&
+        widget.backgroundColor != null) {
+      _ignoreAsync(_controller!.setBackgroundColor(widget.backgroundColor!));
     }
 
     // If the content change callback has been updated, we need to rewire the listener.
@@ -265,6 +279,7 @@ class _MonacoEditorState extends State<MonacoEditor> {
 
   /// Initializes the editor controller and sets up listeners.
   Future<void> _bootstrap() async {
+    final bootstrapToken = ++_bootstrapSeq;
     setState(() {
       _connectionState = _ConnectionState.connecting;
       _error = null;
@@ -272,33 +287,63 @@ class _MonacoEditorState extends State<MonacoEditor> {
     });
 
     try {
-      if (widget.controller != null) {
-        _controller = widget.controller;
-        _ownsController = false;
-      } else {
-        _ownsController = true;
-        _controller = await MonacoController.create(
-          options: widget.options,
-          customCss: widget.customCss,
-          allowCdnFonts: widget.allowCdnFonts,
-          readyTimeout: widget.readyTimeout,
-        );
+      final ownsController = widget.controller == null;
+      _ownsController = ownsController;
+      final controller = widget.controller ??
+          await (widget.controllerFactory?.call() ??
+              MonacoController.create(
+                options: widget.options,
+                customCss: widget.customCss,
+                allowCdnFonts: widget.allowCdnFonts,
+                readyTimeout: widget.readyTimeout,
+              ));
+
+      if (!_isBootstrapCurrent(bootstrapToken)) {
+        if (ownsController) {
+          controller.dispose();
+        }
+        return;
       }
+
+      _controller = controller;
+      _ownsController = ownsController;
 
       // Wait for the underlying web view to be ready.
       await _controller!.onReady;
+      if (!_isBootstrapCurrent(bootstrapToken)) {
+        return;
+      }
 
       // Apply initial values and settings post-readiness.
+      if (widget.backgroundColor != null) {
+        await _controller!.setBackgroundColor(widget.backgroundColor!);
+      }
+
+      // Ensure options are up-to-date in case they changed during bootstrap
+      if (_isBootstrapCurrent(bootstrapToken)) {
+        // We can't easily check if they differ from what we passed to create(),
+        // so we just re-apply them to be safe. This is cheap if no changes.
+        await _controller!.updateOptions(widget.options);
+        await _controller!.setTheme(widget.options.theme);
+        await _controller!.setLanguage(widget.options.language);
+      }
+
       if (widget.initialValue != null) {
         await _controller!.setValue(widget.initialValue!);
+        if (!_isBootstrapCurrent(bootstrapToken)) {
+          return;
+        }
       }
       if (widget.initialSelection != null) {
         await _controller!.setSelection(widget.initialSelection!);
+        if (!_isBootstrapCurrent(bootstrapToken)) {
+          return;
+        }
       }
       if (widget.autofocus) {
         // Defer to next frame to ensure visibility, request Flutter focus, and then enforce Monaco focus
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
+          if (!_isBootstrapCurrent(bootstrapToken)) return;
           _webFocusNode.requestFocus();
           // Retry a few times to survive competing focus layout
           unawaited(_controller!.ensureEditorFocus(attempts: 3));
@@ -307,20 +352,22 @@ class _MonacoEditorState extends State<MonacoEditor> {
 
       _wireListeners();
 
-      if (mounted) {
+      if (_isBootstrapCurrent(bootstrapToken)) {
         setState(() => _connectionState = _ConnectionState.ready);
         widget.onReady?.call(_controller!);
       }
     } catch (e, st) {
-      if (mounted) {
-        setState(() {
-          _connectionState = _ConnectionState.error;
-          _error = e;
-          _stack = st;
-        });
-      }
+      if (!_isBootstrapCurrent(bootstrapToken)) return;
+      _teardown(disposeOldController: _ownsController);
+      setState(() {
+        _connectionState = _ConnectionState.error;
+        _error = e;
+        _stack = st;
+      });
     }
   }
+
+  bool _isBootstrapCurrent(int token) => mounted && token == _bootstrapSeq;
 
   /// Subscribes to all relevant event streams from the controller.
   void _wireListeners() {
@@ -343,6 +390,12 @@ class _MonacoEditorState extends State<MonacoEditor> {
     _statsListener =
         () => widget.onLiveStats?.call(_controller!.liveStats.value);
     _controller!.liveStats.addListener(_statsListener!);
+  }
+
+  void _ignoreAsync(Future<void> future) {
+    unawaited(future.catchError((e, st) {
+      debugPrint('[MonacoEditor] Async update error: $e');
+    }));
   }
 
   /// Wires only the content changed listener, allowing it to be updated separately.

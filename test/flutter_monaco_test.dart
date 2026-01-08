@@ -10,8 +10,8 @@ void main() {
       expect(MonacoLanguage.fromId('python'), MonacoLanguage.python);
     });
 
-    test('fromId should return plaintext for unknown language', () {
-      expect(MonacoLanguage.fromId('unknown-lang'), MonacoLanguage.plaintext);
+    test('fromId should return markdown for unknown language', () {
+      expect(MonacoLanguage.fromId('unknown-lang'), MonacoLanguage.markdown);
     });
 
     test('language id should match enum name', () {
@@ -29,8 +29,8 @@ void main() {
       expect(MonacoTheme.fromId('hc-light'), MonacoTheme.hcLight);
     });
 
-    test('fromId should return vs for unknown theme', () {
-      expect(MonacoTheme.fromId('unknown-theme'), MonacoTheme.vs);
+    test('fromId should return vsDark for unknown theme', () {
+      expect(MonacoTheme.fromId('unknown-theme'), MonacoTheme.vsDark);
     });
 
     test('theme id should match expected values', () {

@@ -39,6 +39,7 @@ class MonacoFocusGuard extends StatefulWidget {
 class _MonacoFocusGuardState extends State<MonacoFocusGuard>
     with WidgetsBindingObserver, RouteAware {
   PageRoute<dynamic>? _route;
+  RouteObserver<PageRoute<dynamic>>? _routeObserver;
 
   @override
   void initState() {
@@ -49,11 +50,22 @@ class _MonacoFocusGuardState extends State<MonacoFocusGuard>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (widget.routeObserver != null) {
+    if (widget.routeObserver != _routeObserver) {
+      if (_routeObserver != null && _route != null) {
+        _routeObserver!.unsubscribe(this);
+      }
+      _routeObserver = widget.routeObserver;
+      _route = null;
+    }
+
+    if (_routeObserver != null) {
       final route = ModalRoute.of(context);
-      if (route is PageRoute<dynamic>) {
+      if (route is PageRoute<dynamic> && route != _route) {
+        if (_route != null) {
+          _routeObserver!.unsubscribe(this);
+        }
         _route = route;
-        widget.routeObserver!.subscribe(this, route);
+        _routeObserver!.subscribe(this, route);
       }
     }
   }
@@ -61,8 +73,8 @@ class _MonacoFocusGuardState extends State<MonacoFocusGuard>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (widget.routeObserver != null && _route != null) {
-      widget.routeObserver!.unsubscribe(this);
+    if (_routeObserver != null && _route != null) {
+      _routeObserver!.unsubscribe(this);
     }
     super.dispose();
   }

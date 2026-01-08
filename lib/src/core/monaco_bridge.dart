@@ -8,36 +8,45 @@ import 'package:flutter_monaco/src/platform/platform_webview.dart';
 
 /// A communication bridge between Flutter and the Monaco Editor in a WebView.
 class MonacoBridge extends ChangeNotifier {
-  // Kept for potential future use
-  // ignore: unused_field
+  /// Creates a Monaco bridge and guards against unhandled readiness errors.
+  MonacoBridge() {
+    // Prevent unhandled async errors when disposed before readiness.
+    onReady.future.catchError((_) {});
+  }
+
   PlatformWebViewController? _webViewController;
 
-  // --- State Management ---
   /// A completer that notifies when the Monaco editor is initialized and ready.
   final Completer<void> onReady = Completer<void>();
 
-  /// A [ValueNotifier] that provides real-time statistics from the editor,
-  /// such as line count, character count, and selection details.
+  /// A [ValueNotifier] that provides real-time statistics from the editor.
   final ValueNotifier<LiveStats> liveStats =
       ValueNotifier(LiveStats.defaults());
 
-  // Raw event listeners for typed API
   final List<void Function(Map<String, dynamic>)> _rawListeners = [];
+  bool _disposed = false;
 
-  // --- Lifecycle and WebView Integration ---
-  /// Attaches the underlying [PlatformWebViewController] to this bridge,
-  /// enabling communication with the editor.
+  /// Returns true if this bridge has been disposed.
+  bool get isDisposed => _disposed;
+
+  /// Attaches the underlying [PlatformWebViewController] to this bridge.
   void attachWebView(PlatformWebViewController controller) {
+    if (_disposed) {
+      throw StateError('Cannot attach WebView to disposed bridge');
+    }
+    if (_webViewController != null && _webViewController != controller) {
+      debugPrint(
+        '[MonacoBridge] Replacing previously attached WebView controller.',
+      );
+    }
     _webViewController = controller;
     debugPrint('[MonacoBridge] WebView controller attached.');
   }
 
   /// Handles incoming messages from the JavaScript side of the editor.
-  ///
-  /// This method processes raw messages, decodes them if necessary, and
-  /// routes them to the appropriate handlers.
   void handleJavaScriptMessage(dynamic message) {
-    // Keep platform-agnostic by handling various message types
+    if (_disposed) return;
+
     final String msg;
     if (message is String) {
       msg = message;
@@ -51,85 +60,107 @@ class MonacoBridge extends ChangeNotifier {
     _handleJavaScriptMessage(msg);
   }
 
-  // Bridge only handles WebView attachment and event routing
-  // All editor operations are handled by MonacoController directly
-
-  /// Add a raw listener for all JS events
+  /// Add a raw listener for all JS events.
   void addRawListener(void Function(Map<String, dynamic>) listener) {
+    if (_disposed) return;
     _rawListeners.add(listener);
   }
 
-  /// Remove a raw listener
+  /// Remove a raw listener.
   void removeRawListener(void Function(Map<String, dynamic>) listener) {
     _rawListeners.remove(listener);
   }
 
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+
     debugPrint('[MonacoBridge] Disposing bridge.');
     if (!onReady.isCompleted) {
       onReady.completeError(
-        Exception('Bridge disposed before the editor became ready.'),
+        StateError('Bridge disposed before the editor became ready.'),
       );
     }
     _rawListeners.clear();
     liveStats.dispose();
-    // Don't dispose WebView here - let the controller own it
+    _webViewController = null;
     super.dispose();
   }
 
-  // --- Private Helpers ---
   void _handleJavaScriptMessage(String message) {
+    if (_disposed) return;
+
     if (message.startsWith('log:')) {
       debugPrint('[Monaco JS] ${message.substring(4)}');
       return;
     }
 
+    Map<String, dynamic> json;
     try {
-      final Map<String, dynamic> json = ConvertObject.toMap(message);
+      json = ConvertObject.toMap(message);
+    } catch (e) {
+      debugPrint('[MonacoBridge] Failed to parse message: $message');
+      return;
+    }
 
-      switch (json) {
-        case {'event': 'onEditorReady'} when !onReady.isCompleted:
+    _routeEvent(json);
+    _notifyRawListeners(json);
+  }
+
+  void _routeEvent(Map<String, dynamic> json) {
+    final event = json['event'];
+    if (event == null) {
+      debugPrint('[MonacoBridge] Message missing event field');
+      return;
+    }
+
+    switch (event) {
+      case 'onEditorReady':
+        if (!onReady.isCompleted) {
           debugPrint('[MonacoBridge] ✅ "onEditorReady" event received.');
           onReady.complete();
-
-        case {'event': 'onEditorReady'}:
-          // Already handled; ignore duplicate
-          break;
-
-        case {'event': 'stats'}:
-          liveStats.value = LiveStats.fromJson(json);
-
-        case {'event': 'error', 'message': final String message}:
-          debugPrint('❌ [Monaco JS Error] $message');
-
-        // Swallow chatty events (controller listens via raw listeners)
-        case {'event': 'contentChanged'}:
-        case {'event': 'selectionChanged'}:
-        case {'event': 'focus'}:
-        case {'event': 'blur'}:
-        case {'event': 'completionRequest'}:
-          // These are handled by the controller's raw listener
-          break;
-
-        case {'event': final String event}:
-          debugPrint('[MonacoBridge] Unhandled JS event type: "$event"');
-
-        default:
-          debugPrint('[MonacoBridge] Unhandled or malformed JS message.');
-      }
-
-      // Notify raw listeners
-      for (final listener in _rawListeners) {
-        try {
-          listener(json);
-        } catch (e) {
-          debugPrint('[MonacoBridge] Error in raw listener: $e');
         }
+        break;
+
+      case 'stats':
+        try {
+          liveStats.value = LiveStats.fromJson(json);
+        } catch (e) {
+          debugPrint('[MonacoBridge] Failed to parse stats: $e');
+        }
+        break;
+
+      case 'error':
+        final message = json['message'] ?? 'Unknown error';
+        debugPrint('❌ [Monaco JS Error] $message');
+        break;
+
+      case 'contentChanged':
+      case 'selectionChanged':
+      case 'focus':
+      case 'blur':
+      case 'completionRequest':
+        // Handled by controller's raw listener
+        break;
+
+      default:
+        debugPrint('[MonacoBridge] Unhandled JS event type: "$event"');
+    }
+  }
+
+  void _notifyRawListeners(Map<String, dynamic> json) {
+    if (_disposed) return;
+
+    // Create a copy to avoid concurrent modification
+    final listeners =
+        List<void Function(Map<String, dynamic>)>.of(_rawListeners);
+    for (final listener in listeners) {
+      try {
+        listener(json);
+      } catch (e, st) {
+        debugPrint('[MonacoBridge] Error in raw listener: $e\n$st');
       }
-    } catch (e) {
-      debugPrint(
-          '[MonacoBridge] Could not process JS message. Raw: "$message". Error: $e');
     }
   }
 }

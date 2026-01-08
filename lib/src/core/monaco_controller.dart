@@ -1,17 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_helper_utils/flutter_helper_utils.dart';
 import 'package:flutter_monaco/src/core/monaco_assets.dart';
+import 'package:flutter_monaco/src/core/monaco_actions.dart';
 import 'package:flutter_monaco/src/core/monaco_bridge.dart';
 import 'package:flutter_monaco/src/models/editor_options.dart';
 import 'package:flutter_monaco/src/models/monaco_enums.dart';
 import 'package:flutter_monaco/src/models/monaco_types.dart';
 import 'package:flutter_monaco/src/platform/platform_webview.dart';
-import 'package:webview_flutter/webview_flutter.dart' as wf;
-import 'package:webview_windows/webview_windows.dart' as ww;
 
 /// A callback function that provides completion items for a given
 /// [CompletionRequest]. It should return a [Future] that resolves to a
@@ -29,6 +27,7 @@ class MonacoController {
   final MonacoBridge _bridge;
   final PlatformWebViewController _webViewController;
   final Completer<void> _onReady = Completer<void>();
+  bool _disposed = false;
 
   // Event streams
   final _onContentChanged = StreamController<bool>.broadcast();
@@ -47,6 +46,9 @@ class MonacoController {
 
   /// Future that completes when the editor is ready
   Future<void> get onReady => _onReady.future;
+
+  /// Returns `true` if the editor is fully initialized and ready.
+  bool get isReady => _onReady.isCompleted;
 
   /// Live statistics from the editor
   ValueNotifier<LiveStats> get liveStats => _bridge.liveStats;
@@ -83,145 +85,113 @@ class MonacoController {
 
     // Create and attach bridge
     final bridge = MonacoBridge()..attachWebView(webViewController);
+    var created = false;
+    MonacoController? controller;
 
-    // Initialize WebView based on platform
-    if (Platform.isWindows) {
-      await _initializeWindowsWebView(
-        webViewController as WindowsWebViewController,
-        bridge,
+    try {
+      await webViewController.initialize();
+      await webViewController.enableJavaScript();
+      await webViewController.addJavaScriptChannel(
+        'flutterChannel',
+        bridge.handleJavaScriptMessage,
+      );
+
+      final htmlFilePath = await MonacoAssets.indexHtmlPath(
         customCss: customCss,
         allowCdnFonts: allowCdnFonts,
       );
-    } else {
-      // macOS, iOS, and other platforms use the Flutter WebView
-      await _initializeFlutterWebView(
-        webViewController as FlutterWebViewController,
-        bridge,
-        customCss: customCss,
-        allowCdnFonts: allowCdnFonts,
+      debugPrint('[MonacoController] Loading HTML from: $htmlFilePath');
+      await webViewController.loadFile(htmlFilePath);
+
+      // Wait for editor ready signal with configurable timeout
+      await bridge.onReady.future.timeout(
+        readyTimeout ?? const Duration(seconds: 20),
+        onTimeout: () => throw TimeoutException(
+          'Monaco Editor did not report ready in ${readyTimeout?.inSeconds ?? 20} seconds.',
+        ),
       );
+
+      // Create controller
+      controller = MonacoController._(bridge, webViewController);
+
+      // Mark ready BEFORE applying options to avoid deadlock
+      if (!controller._onReady.isCompleted) {
+        controller._onReady.complete();
+      }
+
+      // Apply initial options if provided
+      if (options != null) {
+        await controller.updateOptions(options);
+        await controller.setTheme(options.theme);
+        await controller.setLanguage(options.language);
+      }
+
+      // Apply any queued content
+      if (controller._queuedValue != null) {
+        await controller.setValue(controller._queuedValue!);
+        controller._queuedValue = null;
+      }
+      if (controller._queuedLanguage != null) {
+        await controller.setLanguage(controller._queuedLanguage!);
+        controller._queuedLanguage = null;
+      }
+
+      created = true;
+      return controller;
+    } catch (_) {
+      if (!created) {
+        if (controller != null) {
+          controller.dispose();
+        } else {
+          bridge.dispose();
+          webViewController.dispose();
+        }
+      }
+      rethrow;
     }
+  }
 
-    // Wait for editor ready signal with configurable timeout
-    await bridge.onReady.future.timeout(
-      readyTimeout ?? const Duration(seconds: 20),
-      onTimeout: () => throw TimeoutException(
-        'Monaco Editor did not report ready in ${readyTimeout?.inSeconds ?? 20} seconds.',
-      ),
+  /// Create a controller for tests without touching assets or platform views.
+  @visibleForTesting
+  static Future<MonacoController> createForTesting({
+    required PlatformWebViewController webViewController,
+    MonacoBridge? bridge,
+    bool markReady = true,
+    String channelName = 'flutterChannel',
+  }) async {
+    final wiredBridge = bridge ?? MonacoBridge();
+    wiredBridge.attachWebView(webViewController);
+
+    await webViewController.initialize();
+    await webViewController.enableJavaScript();
+    await webViewController.addJavaScriptChannel(
+      channelName,
+      wiredBridge.handleJavaScriptMessage,
     );
 
-    // Create controller
-    final controller = MonacoController._(bridge, webViewController);
-
-    // Mark ready BEFORE applying options to avoid deadlock
-    if (!controller._onReady.isCompleted) {
+    final controller = MonacoController._(wiredBridge, webViewController);
+    if (markReady && !controller._onReady.isCompleted) {
       controller._onReady.complete();
     }
-
-    // Apply initial options if provided
-    if (options != null) {
-      await controller.updateOptions(options);
-      await controller.setTheme(options.theme);
-      await controller.setLanguage(options.language);
+    if (markReady && !wiredBridge.onReady.isCompleted) {
+      wiredBridge.onReady.complete();
     }
-
-    // Apply any queued content
-    if (controller._queuedValue != null) {
-      await controller.setValue(controller._queuedValue!);
-      controller._queuedValue = null;
-    }
-    if (controller._queuedLanguage != null) {
-      await controller.setLanguage(controller._queuedLanguage!);
-      controller._queuedLanguage = null;
-    }
-
     return controller;
   }
 
-  static Future<void> _initializeWindowsWebView(
-    WindowsWebViewController controller,
-    MonacoBridge bridge, {
-    String? customCss,
-    bool allowCdnFonts = false,
-  }) async {
-    // Initialize WebView2
-    await controller.initialize();
+  @visibleForTesting
 
-    // Set up JavaScript channel
-    await controller.addJavaScriptChannel(
-      'flutterChannel',
-      bridge.handleJavaScriptMessage,
-    );
-
-    // Load HTML file with custom CSS if provided
-    final htmlFilePath = await MonacoAssets.indexHtmlPath(
-      customCss: customCss,
-      allowCdnFonts: allowCdnFonts,
-    );
-    debugPrint('[MonacoController] Loading HTML from file: $htmlFilePath');
-
-    final htmlUri = Uri.file(htmlFilePath);
-    await controller.loadUrl(htmlUri.toString());
-  }
-
-  static Future<void> _initializeFlutterWebView(
-    FlutterWebViewController controller,
-    MonacoBridge bridge, {
-    String? customCss,
-    bool allowCdnFonts = false,
-  }) async {
-    // Configure WebView
-    await controller.setJavaScriptMode();
-
-    // Set up JavaScript channel
-    await controller.addJavaScriptChannel(
-      'flutterChannel',
-      bridge.handleJavaScriptMessage,
-    );
-
-    // Set up console logging for debugging
-    await controller.setOnConsoleMessage((message) {
-      debugPrint('[Monaco Console] ${message.level.name}: ${message.message}');
-    });
-
-    // Set navigation delegates
-    controller.setNavigationDelegate(
-      wf.NavigationDelegate(
-        onPageFinished: (url) {
-          debugPrint('[MonacoController] WebView Page Finished: $url');
-        },
-        onWebResourceError: (error) {
-          debugPrint(
-            '[MonacoController] WebView Error: ${error.description} on ${error.url}',
-          );
-        },
-      ),
-    );
-
-    // Load HTML file with custom CSS if provided
-    final htmlFilePath = await MonacoAssets.indexHtmlPath(
-      customCss: customCss,
-      allowCdnFonts: allowCdnFonts,
-    );
-    debugPrint(
-        '[MonacoController] Loading HTML from: $htmlFilePath (Platform: ${Platform.operatingSystem})');
-    await controller.flutterController.loadFile(htmlFilePath);
+  /// Manually complete the ready signal for tests.
+  void completeReadyForTesting() {
+    if (!_onReady.isCompleted) {
+      _onReady.complete();
+    }
   }
 
   /// Get the platform-specific WebView widget
   /// Supported: Windows (WebView2), macOS/iOS (WKWebView)
   Widget get webViewWidget {
-    if (Platform.isWindows) {
-      return ww.Webview(
-        (_webViewController as WindowsWebViewController).windowsController,
-      );
-    } else {
-      // macOS, iOS use webview_flutter
-      return wf.WebViewWidget(
-        controller:
-            (_webViewController as FlutterWebViewController).flutterController,
-      );
-    }
+    return _webViewController.widget;
   }
 
   /// Ensure the editor is ready before executing commands
@@ -254,6 +224,12 @@ class MonacoController {
     await _webViewController.runJavaScript(
       'flutterMonaco.setTheme(${jsonEncode(theme.id)})',
     );
+  }
+
+  /// Set the background color of the WebView container
+  Future<void> setBackgroundColor(Color color) async {
+    // No need to wait for ready, can be set immediately on the webview controller
+    await _webViewController.setBackgroundColor(color);
   }
 
   /// Update editor options
@@ -399,36 +375,34 @@ class MonacoController {
   }
 
   /// Format the document
-  Future<void> format() => executeAction('editor.action.formatDocument');
+  Future<void> format() => executeAction(MonacoAction.formatDocument);
 
   /// Open find dialog
-  Future<void> find() => executeAction('actions.find');
+  Future<void> find() => executeAction(MonacoAction.find);
 
   /// Open replace dialog
-  Future<void> replace() =>
-      executeAction('editor.action.startFindReplaceAction');
+  Future<void> replace() => executeAction(MonacoAction.startFindReplaceAction);
 
   /// Toggle word wrap
-  Future<void> toggleWordWrap() =>
-      executeAction('editor.action.toggleWordWrap');
+  Future<void> toggleWordWrap() => executeAction(MonacoAction.toggleWordWrap);
 
   /// Select all content
-  Future<void> selectAll() => executeAction('editor.action.selectAll');
+  Future<void> selectAll() => executeAction(MonacoAction.selectAll);
 
   /// Undo last action
-  Future<void> undo() => executeAction('undo');
+  Future<void> undo() => executeAction(MonacoAction.undo);
 
   /// Redo last undone action
-  Future<void> redo() => executeAction('redo');
+  Future<void> redo() => executeAction(MonacoAction.redo);
 
   /// Cut selected text
-  Future<void> cut() => executeAction('editor.action.clipboardCutAction');
+  Future<void> cut() => executeAction(MonacoAction.clipboardCutAction);
 
   /// Copy selected text
-  Future<void> copy() => executeAction('editor.action.clipboardCopyAction');
+  Future<void> copy() => executeAction(MonacoAction.clipboardCopyAction);
 
   /// Paste from clipboard
-  Future<void> paste() => executeAction('editor.action.clipboardPasteAction');
+  Future<void> paste() => executeAction(MonacoAction.clipboardPasteAction);
 
   // --- EVENT HANDLING ---
 
@@ -509,6 +483,7 @@ class MonacoController {
     bool jsonAware = true,
   }) async {
     try {
+      await _ensureReady();
       final raw = await _webViewController.runJavaScriptReturningResult(script);
 
       // Windows WebView2 might auto-decode JSON, handle both cases
@@ -534,6 +509,7 @@ class MonacoController {
     T Function(Map<String, dynamic>)? parser,
   }) async {
     try {
+      await _ensureReady();
       final raw = await _webViewController.runJavaScriptReturningResult(script);
 
       // Handle Windows auto-decode: raw might already be a Map/List
@@ -603,6 +579,7 @@ class MonacoController {
     await _ensureReady();
     // Validate line number
     final lineCount = await getLineCount();
+    if (lineCount < 1) return;
     final int validLine = line.clamp(1, lineCount);
 
     await _webViewController.runJavaScript(
@@ -662,9 +639,20 @@ class MonacoController {
     String lineDefaultValue = '',
   }) async {
     final results = <String>[];
+    if (lines.isEmpty) return results;
+
+    final lineCount = await getLineCount();
     for (final line in lines) {
-      final content =
-          await getLineContent(line, defaultValue: lineDefaultValue);
+      if (line < 1 || line > lineCount) {
+        results.add(lineDefaultValue);
+        continue;
+      }
+      final content = await _executeJavaScript<String>(
+            'flutterMonaco.getLineContent($line)',
+            defaultValue: lineDefaultValue,
+            jsonAware: false,
+          ) ??
+          lineDefaultValue;
       results.add(content);
     }
     return results;
@@ -1002,6 +990,8 @@ class MonacoController {
   // --- HELPERS ---
   /// Dispose the controller and clean up resources
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     _onContentChanged.close();
     _onSelectionChanged.close();
     _onFocus.close();
