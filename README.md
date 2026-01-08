@@ -380,8 +380,10 @@ await controller.scrollToBottom();
 await controller.revealLine(100);    // Jump to line 100
 await controller.focus();            // Request focus
 
-// Custom actions
-await controller.executeAction('editor.action.commentLine');
+// Custom actions (type-safe action ids)
+await controller.executeAction(MonacoAction.toggleLineComment);
+// Or use a raw Monaco action id string if needed:
+// await controller.executeAction('editor.action.commentLine');
 
 // Live statistics
 controller.liveStats.addListener(() {
@@ -403,6 +405,9 @@ controller.onSelectionChanged.listen((range) {
 controller.onFocus.listen((_) => print('Editor focused'));
 controller.onBlur.listen((_) => print('Editor blurred'));
 ```
+
+For a full set of bundled action IDs, use `MonacoAction` (exported by this
+package) to avoid stringly-typed calls.
 
 ### Advanced Features
 

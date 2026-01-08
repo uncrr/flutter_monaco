@@ -50,6 +50,7 @@ class MonacoAssets {
         await _ensureHtmlFile(targetDir);
         c.complete();
       } catch (e, st) {
+        _initCompleter = null;
         c.completeError(e, st);
       }
     }();
@@ -203,6 +204,7 @@ class MonacoAssets {
 
   static Future<void> _copyAllAssets(String targetDir) async {
     final stopwatch = Stopwatch()..start();
+    final failures = <String>[];
 
     // Clean and create target directory
     final directory = Directory(targetDir);
@@ -251,6 +253,7 @@ class MonacoAssets {
         }
       } catch (e) {
         debugPrint('[MonacoAssets] Error copying $assetKey: $e');
+        failures.add('$assetKey: $e');
       }
     }
 
@@ -258,6 +261,13 @@ class MonacoAssets {
     debugPrint(
       '[MonacoAssets] Completed: $copiedCount files copied in ${stopwatch.elapsedMilliseconds}ms',
     );
+
+    if (copiedCount != monacoAssets.length || failures.isNotEmpty) {
+      throw StateError(
+        '[MonacoAssets] Copy incomplete ($copiedCount/${monacoAssets.length}). '
+        'Failures: ${failures.length}',
+      );
+    }
 
     // Write sentinel file to mark successful completion
     final sentinelFile = File(p.join(targetDir, '.monaco_complete'));
@@ -497,7 +507,16 @@ class MonacoAssets {
                   setTheme: (theme) => monaco.editor.setTheme(theme),
                   setLanguage: (lang) => monaco.editor.setModelLanguage(E().getModel(), lang),
                   updateOptions: (opts) => E().updateOptions(opts),
-                  executeAction: (actionId, args) => E().trigger('flutter-bridge', actionId, args),
+                  executeAction: (actionId, args) => {
+                    const ed = E();
+                    const action = ed?.getAction ? ed.getAction(actionId) : null;
+                    if (action && typeof action.run === 'function') {
+                      try {
+                        return action.run(args);
+                      } catch (_) {}
+                    }
+                    return ed.trigger('flutter-bridge', actionId, args);
+                  },
                   
                   // Selection
                   getSelection: () => {
