@@ -1,14 +1,53 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:convert_object/convert_object.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_helper_utils/flutter_helper_utils.dart';
 import 'package:flutter_monaco/src/models/monaco_types.dart';
 import 'package:flutter_monaco/src/platform/platform_webview.dart';
 
-/// A communication bridge between Flutter and the Monaco Editor in a WebView.
+/// Bidirectional communication bridge between Flutter and the Monaco Editor.
+///
+/// The [MonacoBridge] handles all message routing between the JavaScript Monaco
+/// instance and Flutter Dart code. It:
+///
+/// - **Parses messages:** Decodes JSON payloads from `flutterChannel.postMessage`
+/// - **Routes events:** Dispatches known events (ready, stats, errors) to handlers
+/// - **Notifies listeners:** Forwards all events to registered raw listeners
+/// - **Tracks state:** Manages readiness state and live statistics
+///
+/// ### Event Flow
+///
+/// ```
+/// Monaco JS ─► flutterChannel.postMessage(json) ─► WebView Channel
+///     ─► handleJavaScriptMessage ─► _routeEvent ─► onReady / liveStats
+///                                 ─► _notifyRawListeners ─► MonacoController
+/// ```
+///
+/// ### Known Events
+///
+/// - `onEditorReady`: Monaco finished initializing, completes [onReady]
+/// - `stats`: Live editor statistics, updates [liveStats]
+/// - `error`: JavaScript error, logged to debug console
+/// - `contentChanged`, `selectionChanged`, `focus`, `blur`: Forwarded to controller
+/// - `completionRequest`: Autocompletion request, handled by controller
+///
+/// ### Lifecycle
+///
+/// 1. Create bridge: `MonacoBridge()`
+/// 2. Attach to WebView: `bridge.attachWebView(controller)`
+/// 3. Wait for ready: `await bridge.onReady.future`
+/// 4. Listen for events: `bridge.addRawListener(handler)`
+/// 5. Dispose: `bridge.dispose()`
+///
+/// See also:
+/// - [MonacoController] which orchestrates the bridge and WebView.
+/// - [handleJavaScriptMessage] for the message entry point.
 class MonacoBridge extends ChangeNotifier {
-  /// Creates a Monaco bridge and guards against unhandled readiness errors.
+  /// Creates a bridge and sets up error handling for the readiness future.
+  ///
+  /// The constructor guards against unhandled async errors if the bridge is
+  /// disposed before Monaco reports ready.
   MonacoBridge() {
     // Prevent unhandled async errors when disposed before readiness.
     onReady.future.catchError((_) {});
@@ -16,20 +55,40 @@ class MonacoBridge extends ChangeNotifier {
 
   PlatformWebViewController? _webViewController;
 
-  /// A completer that notifies when the Monaco editor is initialized and ready.
+  /// Completes when Monaco reports the `onEditorReady` event.
+  ///
+  /// Await this future before calling methods on [MonacoController] to ensure
+  /// the editor is fully initialized. Completes with an error if the bridge
+  /// is disposed before readiness.
   final Completer<void> onReady = Completer<void>();
 
-  /// A [ValueNotifier] that provides real-time statistics from the editor.
+  /// Real-time statistics from the editor, updated on every cursor/content change.
+  ///
+  /// Use this to display status bar information like line count, selection
+  /// length, and cursor position. Starts with [LiveStats.defaults] until
+  /// Monaco sends actual values.
   final ValueNotifier<LiveStats> liveStats =
       ValueNotifier(LiveStats.defaults());
 
   final List<void Function(Map<String, dynamic>)> _rawListeners = [];
   bool _disposed = false;
 
-  /// Returns true if this bridge has been disposed.
+  /// Returns `true` if this bridge has been disposed.
+  ///
+  /// After disposal, all methods become no-ops and [onReady] completes
+  /// with an error if not already completed.
   bool get isDisposed => _disposed;
 
-  /// Attaches the underlying [PlatformWebViewController] to this bridge.
+  /// Associates this bridge with a [PlatformWebViewController].
+  ///
+  /// Must be called before loading Monaco HTML. The WebView's JavaScript
+  /// channel should be configured to call [handleJavaScriptMessage].
+  ///
+  /// Throws [StateError] if called after [dispose].
+  ///
+  /// **Note:** Attaching a different controller replaces the previous one.
+  /// This logs a warning but does not throw, allowing controller replacement
+  /// for hot-reload scenarios.
   void attachWebView(PlatformWebViewController controller) {
     if (_disposed) {
       throw StateError('Cannot attach WebView to disposed bridge');
@@ -43,7 +102,22 @@ class MonacoBridge extends ChangeNotifier {
     debugPrint('[MonacoBridge] WebView controller attached.');
   }
 
-  /// Handles incoming messages from the JavaScript side of the editor.
+  /// Entry point for all messages from the Monaco JavaScript context.
+  ///
+  /// This method accepts various input types and normalizes them to JSON:
+  /// - `String`: Parsed as JSON directly
+  /// - `Map` or `List`: Encoded to JSON string first
+  /// - Other: Converted via `toString()`
+  ///
+  /// After normalization, the message is:
+  /// 1. Parsed to a `Map<String, dynamic>`
+  /// 2. Routed based on the `event` field
+  /// 3. Forwarded to all registered raw listeners
+  ///
+  /// **Log messages:** Strings starting with `log:` are printed to debug
+  /// console and not processed further.
+  ///
+  /// This method is safe to call after [dispose] - it becomes a no-op.
   void handleJavaScriptMessage(dynamic message) {
     if (_disposed) return;
 
@@ -60,13 +134,26 @@ class MonacoBridge extends ChangeNotifier {
     _handleJavaScriptMessage(msg);
   }
 
-  /// Add a raw listener for all JS events.
+  /// Registers a listener that receives all parsed JavaScript events.
+  ///
+  /// Use this to:
+  /// - Handle events not covered by [MonacoController]'s typed streams
+  /// - Debug communication issues by logging all events
+  /// - Implement custom Monaco integrations
+  ///
+  /// The listener receives the full parsed JSON map including the `event`
+  /// field. Listeners are called synchronously in registration order.
+  ///
+  /// **Error handling:** Exceptions in listeners are caught and logged to
+  /// prevent one faulty listener from breaking others.
+  ///
+  /// Remove listeners with [removeRawListener] to prevent memory leaks.
   void addRawListener(void Function(Map<String, dynamic>) listener) {
     if (_disposed) return;
     _rawListeners.add(listener);
   }
 
-  /// Remove a raw listener.
+  /// Removes a previously registered raw listener.
   void removeRawListener(void Function(Map<String, dynamic>) listener) {
     _rawListeners.remove(listener);
   }
@@ -98,7 +185,7 @@ class MonacoBridge extends ChangeNotifier {
 
     Map<String, dynamic> json;
     try {
-      json = ConvertObject.toMap(message);
+      json = Convert.toMap(message);
     } catch (e) {
       debugPrint('[MonacoBridge] Failed to parse message: $message');
       return;

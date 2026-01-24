@@ -9,7 +9,40 @@ import 'package:flutter_monaco/src/core/monaco_assets.dart';
 import 'package:flutter_monaco/src/platform/platform_webview.dart';
 import 'package:web/web.dart' as web;
 
-/// A [PlatformWebViewController] implementation for the web platform.
+/// WebView implementation for Flutter Web using an iframe.
+///
+/// On web platforms, native WebViews aren't available, so Monaco is hosted
+/// in an iframe element. This approach provides:
+///
+/// - **Isolation:** Monaco runs in a separate browsing context
+/// - **Security:** Content-Security-Policy can be applied per-iframe
+/// - **Compatibility:** Works across all modern browsers
+///
+/// ### Communication
+///
+/// The iframe communicates with Flutter via `postMessage`:
+/// - **Monaco to Flutter:** `window.parent.postMessage(msg, '*')`
+/// - **Flutter to Monaco:** `iframe.contentWindow.eval(script)`
+///
+/// The HTML defines `window.flutterChannel.postMessage` which calls
+/// `window.parent.postMessage`, maintaining API consistency with native.
+///
+/// ### HTML Loading
+///
+/// Monaco HTML is generated as a blob URL to avoid CORS issues with
+/// `file://` or asset paths. The blob URL is revoked after Monaco
+/// reports ready to free memory.
+///
+/// ### Focus Handling
+///
+/// Web focus is tricky because the iframe is a separate browsing context.
+/// When Monaco reports focus events, this controller unfocuses Flutter
+/// widgets and uses `forceFocus()` to ensure Monaco retains keyboard input.
+///
+/// See also:
+/// - [MonacoAssets.generateIndexHtml] for HTML generation with web-specific
+///   worker shims.
+/// - [native.dart] for native platform implementations.
 class WebViewController implements PlatformWebViewController {
   final Map<String, void Function(String)> _channels = {};
   bool _disposed = false;
@@ -18,7 +51,9 @@ class WebViewController implements PlatformWebViewController {
   bool _isReady = false;
 
   web.HTMLIFrameElement? _iframe;
+  JSFunction? _messageHandler;
   String? _viewId;
+  late final String _messageToken;
 
   final _widgetKey = GlobalKey();
   Widget? _cachedWidget;
@@ -31,6 +66,7 @@ class WebViewController implements PlatformWebViewController {
   Future<void> initialize() async {
     _viewId = 'monaco-iframe-${DateTime.now().millisecondsSinceEpoch}';
     debugPrint('[WebViewController] Initializing iframe approach');
+    _messageToken = 'monaco-${DateTime.now().microsecondsSinceEpoch}-$_viewId';
 
     // Create iframe for Monaco.
     _iframe = web.HTMLIFrameElement()
@@ -44,7 +80,9 @@ class WebViewController implements PlatformWebViewController {
     ui_web.platformViewRegistry.registerViewFactory(_viewId!, (_) => _iframe!);
 
     // Listen for messages from the iframe.
-    web.window.addEventListener('message', _handleIframeMessage.toJS);
+    final handler = _handleIframeMessage.toJS;
+    _messageHandler = handler;
+    web.window.addEventListener('message', handler);
 
     debugPrint('[WebViewController] View factory registered with ID: $_viewId');
   }
@@ -55,6 +93,7 @@ class WebViewController implements PlatformWebViewController {
 
     final data = event.data;
     String message;
+    Map<String, dynamic>? json;
 
     try {
       // Try to convert as string first
@@ -68,7 +107,28 @@ class WebViewController implements PlatformWebViewController {
       }
     }
 
-    debugPrint('[WebViewController] Received iframe message: $message');
+    if (message.startsWith('{')) {
+      try {
+        final decoded = jsonDecode(message);
+        if (decoded is Map<String, dynamic>) {
+          json = decoded;
+        }
+      } catch (_) {}
+    }
+
+    if (json != null) {
+      final token = json['_flutterToken'];
+      if (token != _messageToken) return;
+    } else if (message != 'ready') {
+      return;
+    }
+
+    // Only log non-stats messages to reduce noise (stats fire on every keystroke/selection)
+    final isStatsMessage = message.contains('"event":"stats"') ||
+        message.contains('"event": "stats"');
+    if (!isStatsMessage) {
+      debugPrint('[WebViewController] Received iframe message: $message');
+    }
 
     // Check if this is the ready event
     if (message == 'ready' ||
@@ -102,7 +162,7 @@ class WebViewController implements PlatformWebViewController {
   Future<void> _ensureReady() async {
     if (!_isReady) {
       await _readyCompleter.future.timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 20),
         onTimeout: () {
           throw TimeoutException('Monaco editor failed to initialize');
         },
@@ -112,8 +172,10 @@ class WebViewController implements PlatformWebViewController {
 
   @override
   Future<void> setBackgroundColor(Color color) async {
-    _iframe?.style.backgroundColor =
-        'rgba(${color.r * 255}, ${color.g * 255}, ${color.b * 255}, ${color.a * 255})';
+    final r = (color.r * 255).round();
+    final g = (color.g * 255).round();
+    final b = (color.b * 255).round();
+    _iframe?.style.backgroundColor = 'rgba($r, $g, $b, ${color.a})';
   }
 
   @override
@@ -166,15 +228,17 @@ class WebViewController implements PlatformWebViewController {
   Future<void> load({String? customCss, bool allowCdnFonts = false}) async {
     debugPrint('[WebViewController] Loading Monaco in iframe');
 
-    // Get the current origin to build absolute URLs
-    final origin = web.window.location.origin;
-    final vsPath = '$origin/assets/${MonacoAssets.assetBaseDir}/min/vs';
+    // Resolve path against base URI to support subpaths
+    final vsPath = Uri.base
+        .resolve('assets/${MonacoAssets.assetBaseDir}/min/vs')
+        .toString();
 
     final html = MonacoAssets.generateIndexHtml(
       vsPath,
       isWindows: false,
       isIosOrMacOS: false,
       isWeb: true,
+      messageToken: _messageToken,
       customCss: customCss,
       allowCdnFonts: allowCdnFonts,
     );
@@ -198,6 +262,10 @@ class WebViewController implements PlatformWebViewController {
     _disposed = true;
 
     debugPrint('[WebViewController] Disposing...');
+    if (_messageHandler != null) {
+      web.window.removeEventListener('message', _messageHandler!);
+      _messageHandler = null;
+    }
     _channels.clear();
     _cachedWidget = null;
     _iframe?.remove();

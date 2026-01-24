@@ -1,16 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
+import 'package:convert_object/convert_object.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_helper_utils/flutter_helper_utils.dart';
-import 'package:flutter_monaco/src/core/monaco_assets.dart';
-import 'package:flutter_monaco/src/core/monaco_actions.dart';
+import 'package:flutter_monaco/flutter_monaco.dart';
 import 'package:flutter_monaco/src/core/monaco_bridge.dart';
-import 'package:flutter_monaco/src/models/editor_options.dart';
-import 'package:flutter_monaco/src/models/monaco_enums.dart';
-import 'package:flutter_monaco/src/models/monaco_types.dart';
 import 'package:flutter_monaco/src/platform/platform_webview.dart';
 
 /// A callback function that provides completion items for a given
@@ -20,7 +15,15 @@ typedef CompletionProvider = Future<CompletionList> Function(
   CompletionRequest request,
 );
 
-/// Main controller for a Monaco Editor instance
+/// Manages the lifecycle and interaction with a Monaco Editor instance.
+///
+/// The [MonacoController] bridges Dart and the underlying JavaScript editor,
+/// providing methods to read/write content, manage selection, and execute commands.
+///
+/// ### Usage
+/// * Call [create] to instantiate a controller off-widget (headless or advanced usage).
+/// * Use [setValue] / [getValue] to manage content.
+/// * Listen to [onContentChanged] for real-time updates.
 class MonacoController {
   MonacoController._(this._bridge, this._webViewController) {
     _wireEvents();
@@ -47,33 +50,37 @@ class MonacoController {
   final Map<String, _RegisteredCompletion> _completionSources = {};
   bool _completionListenerWired = false;
 
-  /// Future that completes when the editor is ready
+  /// Completes when the editor is fully initialized and ready to accept commands.
   Future<void> get onReady => _onReady.future;
 
-  /// Returns `true` if the editor is fully initialized and ready.
+  /// Returns `true` if the editor has finished initializing.
   bool get isReady => _onReady.isCompleted;
 
-  /// Live statistics from the editor
+  /// Exposes real-time statistics (cursor position, selection, line count).
   ValueNotifier<LiveStats> get liveStats => _bridge.liveStats;
 
-  /// Stream of content change events (isFlush indicates full content change)
+  /// Stream emitting `true` (flush) or `false` (partial) when content changes.
   Stream<bool> get onContentChanged => _onContentChanged.stream;
 
-  /// Stream of selection change events
+  /// Stream emitting the new [Range] whenever the cursor selection changes.
   Stream<Range?> get onSelectionChanged => _onSelectionChanged.stream;
 
-  /// Stream of focus events
+  /// Stream emitting events when the editor gains focus.
   Stream<void> get onFocus => _onFocus.stream;
 
-  /// Stream of blur events
+  /// Stream emitting events when the editor loses focus.
   Stream<void> get onBlur => _onBlur.stream;
 
-  /// Create a new Monaco Editor controller
+  /// Creates and initializes a new [MonacoController].
   ///
-  /// [options] - Editor configuration options
-  /// [customCss] - Custom CSS to inject into the editor (e.g., @font-face rules)
-  /// [allowCdnFonts] - Whether to allow loading fonts from CDNs (default: false for security)
-  /// [readyTimeout] - Maximum time to wait for editor initialization
+  /// This method spins up the WebView, loads the Monaco resources, and waits for
+  /// the `onReady` signal from JavaScript.
+  ///
+  /// Throws a [TimeoutException] if the editor does not become ready within [readyTimeout] (default 20s).
+  ///
+  /// * [options]: Initial configuration (theme, language, etc.).
+  /// * [customCss]: CSS injected into the HTML (e.g., for custom fonts).
+  /// * [allowCdnFonts]: If `true`, allows loading fonts from remote URLs (enables network requests).
   static Future<MonacoController> create({
     EditorOptions? options,
     String? customCss,
@@ -88,7 +95,6 @@ class MonacoController {
 
     // Create and attach bridge
     final bridge = MonacoBridge()..attachWebView(webViewController);
-    var created = false;
     MonacoController? controller;
 
     try {
@@ -104,65 +110,71 @@ class MonacoController {
       controller = MonacoController._(bridge, webViewController);
 
       final readyFuture = (() async {
-        await webViewController.load(
-          customCss: customCss,
-          allowCdnFonts: allowCdnFonts,
-        );
-        debugPrint(
-            '[MonacoController] Loading HTML (Platform: ${kIsWeb ? 'Web' : Platform.operatingSystem})');
+        try {
+          await webViewController.load(
+            customCss: customCss,
+            allowCdnFonts: allowCdnFonts,
+          );
+          debugPrint(
+              '[MonacoController] Loading HTML (Platform: ${kIsWeb ? 'Web' : defaultTargetPlatform.name})');
 
-        // Wait for editor ready signal with configurable timeout
-        await bridge.onReady.future.timeout(
-          readyTimeout ?? const Duration(seconds: 20),
-          onTimeout: () => throw TimeoutException(
-            'Monaco Editor did not report ready in ${readyTimeout?.inSeconds ?? 20} seconds.',
-          ),
-        );
+          // Wait for editor ready signal with configurable timeout
+          await bridge.onReady.future.timeout(
+            readyTimeout ?? const Duration(seconds: 20),
+            onTimeout: () => throw TimeoutException(
+              'Monaco Editor did not report ready in ${readyTimeout?.inSeconds ?? 20} seconds.',
+            ),
+          );
 
-        // Mark ready
-        if (!controller!._onReady.isCompleted) {
-          controller._onReady.complete();
-        }
+          // Mark ready
+          if (!controller!._onReady.isCompleted) {
+            controller._onReady.complete();
+          }
 
-        // Apply initial options if provided
-        if (options != null) {
-          await controller.updateOptions(options);
-          await controller.setTheme(options.theme);
-          await controller.setLanguage(options.language);
-        }
+          // Apply initial options if provided
+          if (options != null) {
+            await controller.updateOptions(options);
+            await controller.setTheme(options.theme);
+            await controller.setLanguage(options.language);
+          }
 
-        // Apply any queued content
-        if (controller._queuedValue != null) {
-          await controller.setValue(controller._queuedValue!);
-          controller._queuedValue = null;
-        }
-        if (controller._queuedLanguage != null) {
-          await controller.setLanguage(controller._queuedLanguage!);
-          controller._queuedLanguage = null;
-        }
+          // Apply any queued content
+          if (controller._queuedValue != null) {
+            await controller.setValue(controller._queuedValue!);
+            controller._queuedValue = null;
+          }
+          if (controller._queuedLanguage != null) {
+            await controller.setLanguage(controller._queuedLanguage!);
+            controller._queuedLanguage = null;
+          }
 
-        // Register any queued completion sources
-        for (final entry in controller._queuedCompletionSources) {
-          await controller._registerCompletionSourceInternal(entry);
+          // Register any queued completion sources
+          for (final entry in controller._queuedCompletionSources) {
+            await controller._registerCompletionSourceInternal(entry);
+          }
+          controller._queuedCompletionSources.clear();
+        } catch (e, st) {
+          if (controller != null && !controller._onReady.isCompleted) {
+            controller._onReady.completeError(e, st);
+          }
+          rethrow;
         }
-        controller._queuedCompletionSources.clear();
       })();
 
       if (kIsWeb) {
-        unawaited(readyFuture);
+        unawaited(readyFuture.catchError((Object _, StackTrace __) {}));
       } else {
         await readyFuture;
       }
 
       return controller;
     } catch (_) {
-      if (!created) {
-        if (controller != null) {
-          controller.dispose();
-        } else {
-          bridge.dispose();
-          webViewController.dispose();
-        }
+      // Clean up resources on failure
+      if (controller != null) {
+        controller.dispose();
+      } else {
+        bridge.dispose();
+        webViewController.dispose();
       }
       rethrow;
     }
@@ -214,7 +226,9 @@ class MonacoController {
     }
   }
 
-  /// Set the editor language
+  /// Switches the editor's syntax highlighting language.
+  ///
+  /// If the editor is not yet ready, the language is queued and applied upon initialization.
   Future<void> setLanguage(MonacoLanguage language) async {
     if (!_onReady.isCompleted) {
       _queuedLanguage = language;
@@ -231,7 +245,9 @@ class MonacoController {
     );
   }
 
-  /// Set the editor theme
+  /// Changes the editor's color theme.
+  ///
+  /// Waits for the editor to be ready before applying.
   Future<void> setTheme(MonacoTheme theme) async {
     await _ensureReady();
     await _webViewController.runJavaScript(
@@ -239,13 +255,17 @@ class MonacoController {
     );
   }
 
-  /// Set the background color of the WebView container
+  /// Sets the background color of the WebView container.
+  ///
+  /// Applied immediately to the native view, even if Monaco is still loading.
   Future<void> setBackgroundColor(Color color) async {
     // No need to wait for ready, can be set immediately on the webview controller
     await _webViewController.setBackgroundColor(color);
   }
 
-  /// Update editor options
+  /// Updates the editor configuration options.
+  ///
+  /// Only the fields present in [options] will be updated; others remain unchanged.
   Future<void> updateOptions(EditorOptions options) async {
     await _ensureReady();
     await _webViewController.runJavaScript(
@@ -253,9 +273,14 @@ class MonacoController {
     );
   }
 
-  /// Register a completion provider for the given languages.
+  /// Registers a dynamic completion provider for the given [languages].
   ///
-  /// Provide Monaco language ids (e.g. [MonacoLanguage.typescript.id]) in [languages].
+  /// The [provider] callback is invoked whenever the user requests completions (e.g., Ctrl+Space).
+  ///
+  /// * [id]: Optional unique identifier. If omitted, one is generated.
+  /// * [triggerCharacters]: Characters that automatically trigger the completion (e.g., `.` or `@`).
+  ///
+  /// Returns the [id] of the registered provider.
   Future<String> registerCompletionSource({
     String? id,
     required List<String> languages,
@@ -308,7 +333,9 @@ class MonacoController {
     _wireCompletionListenerOnce();
   }
 
-  /// Register a static list of completion items.
+  /// Registers a static list of completion items.
+  ///
+  /// Useful for simple keyword lists or fixed snippets.
   Future<String> registerStaticCompletions({
     String? id,
     required List<String> languages,
@@ -325,7 +352,7 @@ class MonacoController {
     );
   }
 
-  /// Removes a completion provider, if registered.
+  /// Unregisters a previously registered completion source.
   Future<void> unregisterCompletionSource(String id) async {
     _completionSources.remove(id);
     // Also remove from queue if it was pending registration
@@ -348,7 +375,9 @@ class MonacoController {
     );
   }
 
-  /// Request focus on the editor
+  /// Requests focus for the editor widget.
+  ///
+  /// Uses a robust method that waits for visibility and layout before attempting focus.
   Future<void> focus() async {
     await _ensureReady();
     // Use robust in-page helper (waits for visibility, layouts, focuses textarea)
@@ -356,7 +385,9 @@ class MonacoController {
         'window.flutterMonaco && window.flutterMonaco.forceFocus && window.flutterMonaco.forceFocus()');
   }
 
-  /// Robust focus with retries across a few frames to survive layout transitions
+  /// Attempts to focus the editor multiple times to handle race conditions during layout transitions.
+  ///
+  /// [attempts] defaults to 3, with [interval] of 24ms.
   Future<void> ensureEditorFocus(
       {int attempts = 3,
       Duration interval = const Duration(milliseconds: 24)}) async {
@@ -372,14 +403,16 @@ class MonacoController {
     }
   }
 
-  /// Request a layout pass inside Monaco
+  /// Forces the Monaco editor to re-measure its container and update its layout.
+  ///
+  /// Call this if the widget size changes but the editor does not update automatically.
   Future<void> layout() async {
     await _ensureReady();
     await _webViewController.runJavaScript(
         'window.flutterMonaco && window.flutterMonaco.layout && window.flutterMonaco.layout()');
   }
 
-  /// Scroll to top of the editor
+  /// Scrolls the editor to the very top (line 1, column 1).
   Future<void> scrollToTop() async {
     await _ensureReady();
     await _webViewController.runJavaScript('''
@@ -391,7 +424,7 @@ class MonacoController {
     ''');
   }
 
-  /// Scroll to bottom of the editor
+  /// Scrolls the editor to the last line.
   Future<void> scrollToBottom() async {
     await _ensureReady();
     await _webViewController.runJavaScript('''
@@ -440,19 +473,20 @@ class MonacoController {
     _bridge.addRawListener((Map<String, dynamic> json) {
       // Use safer conversion methods with fallbacks
       final event = json.tryGetString('event',
-          altKeys: ['eventType', 'type'], defaultValue: 'unknown');
+          alternativeKeys: ['eventType', 'type'], defaultValue: 'unknown');
 
       switch (event) {
         case 'contentChanged':
           // Use tryGetBool with default value
           _onContentChanged.add(json.tryGetBool('isFlush',
-                  altKeys: ['flush', 'fullChange'], defaultValue: false) ??
+                  alternativeKeys: ['flush', 'fullChange'],
+                  defaultValue: false) ??
               false);
           break;
         case 'selectionChanged':
           // Use factory constructor for cleaner conversion
           final selectionMap = json.tryGetMap<String, dynamic>('selection',
-              altKeys: ['sel', 'range']);
+              alternativeKeys: ['sel', 'range']);
           final selection =
               selectionMap != null ? Range.fromJson(selectionMap) : null;
           _onSelectionChanged.add(selection);
@@ -524,7 +558,7 @@ class MonacoController {
           : raw;
 
       // Use tryToType for all type conversions
-      return tryToType<T>(result) ?? defaultValue;
+      return tryConvertToType<T>(result) ?? defaultValue;
     } catch (e) {
       debugPrint('[MonacoController] JavaScript execution error: $e');
       return defaultValue;
@@ -545,11 +579,11 @@ class MonacoController {
       final obj = raw is String ? (raw.tryDecode() ?? raw) : raw;
 
       // Try to convert to Map
-      final json = tryToMap<String, dynamic>(obj);
+      final json = tryConvertToMap<String, dynamic>(obj);
       if (json == null || json.isEmpty) return defaultValue;
 
       // Use parser if provided, otherwise try direct conversion
-      return parser?.call(json) ?? tryToType<T>(json) ?? defaultValue;
+      return parser?.call(json) ?? tryConvertToType<T>(json) ?? defaultValue;
     } catch (e) {
       debugPrint('[MonacoController] JSON parsing error: $e');
       return defaultValue;
@@ -558,7 +592,9 @@ class MonacoController {
 
   // --- CONTENT AND SELECTION ---
 
-  /// Get the current editor content with enhanced error handling
+  /// Retrieves the current text content of the editor.
+  ///
+  /// Returns [defaultValue] if the operation fails or returns null.
   Future<String> getValue({String defaultValue = ''}) async {
     return await _executeJavaScript<String>(
           'flutterMonaco.getValue()',
@@ -568,7 +604,10 @@ class MonacoController {
         defaultValue;
   }
 
-  /// Set the editor content with validation
+  /// Replaces the entire content of the editor.
+  ///
+  /// If the editor is not yet ready, the value is queued and applied immediately
+  /// after initialization.
   Future<void> setValue(String value) async {
     if (!_onReady.isCompleted) {
       _queuedValue = value;
@@ -585,7 +624,9 @@ class MonacoController {
     );
   }
 
-  /// Get the current selection with enhanced parsing
+  /// Retrieves the current primary selection range.
+  ///
+  /// Returns `null` if no selection exists or the editor is not ready.
   Future<Range?> getSelection() async {
     return _executeJavaScriptWithJson<Range>(
       'JSON.stringify(flutterMonaco.getSelection())',
@@ -593,7 +634,7 @@ class MonacoController {
     );
   }
 
-  /// Set the selection
+  /// Selects the specified [range] in the editor.
   Future<void> setSelection(Range range) async {
     await _ensureReady();
     await _webViewController.runJavaScript(
@@ -689,7 +730,9 @@ class MonacoController {
 
   // --- EDITS ---
 
-  /// Apply edit operations to the document
+  /// Applies a list of edit operations to the document.
+  ///
+  /// This is the most efficient way to make multiple changes at once.
   Future<void> applyEdits(List<EditOperation> edits) async {
     if (edits.isEmpty) return;
     await _ensureReady();
@@ -699,25 +742,25 @@ class MonacoController {
     );
   }
 
-  /// Insert text at a specific position
+  /// Inserts [text] at the specified [position].
   Future<void> insertText(Position position, String text) async {
     final edit = EditOperation.insert(position: position, text: text);
     await applyEdits([edit]);
   }
 
-  /// Delete a range of text
+  /// Deletes the text within the specified [range].
   Future<void> deleteRange(Range range) async {
     final edit = EditOperation.delete(range: range);
     await applyEdits([edit]);
   }
 
-  /// Replace text in a range
+  /// Replaces the text within [range] with [text].
   Future<void> replaceRange(Range range, String text) async {
     final edit = EditOperation(range: range, text: text);
     await applyEdits([edit]);
   }
 
-  /// Delete a line
+  /// Deletes the specified [line] (1-based index).
   Future<void> deleteLine(int line) async {
     final range = Range.lines(line, line);
     await deleteRange(range);
@@ -725,7 +768,10 @@ class MonacoController {
 
   // --- DECORATIONS ---
 
-  /// Set decorations in the editor with enhanced conversion
+  /// Sets the decorations (highlights, glyphs, etc.) in the editor.
+  ///
+  /// Replaces any previously set decorations tracked by this controller.
+  /// Returns the IDs of the newly created decorations.
   Future<List<String>> setDecorations(
     List<DecorationOptions> decorations,
   ) async {
@@ -741,7 +787,9 @@ class MonacoController {
         .toList();
   }
 
-  /// Add inline decorations
+  /// Adds inline style decorations (e.g., text color, background) to specific [ranges].
+  ///
+  /// [className] should be a CSS class available in the WebView (injected via `customCss`).
   Future<List<String>> addInlineDecorations(
     List<Range> ranges,
     String className, {
@@ -758,7 +806,7 @@ class MonacoController {
     return setDecorations(decorations);
   }
 
-  /// Add line decorations
+  /// Adds decorations to entire lines (e.g., for breakpoints or diffs).
   Future<List<String>> addLineDecorations(
     List<int> lines,
     String className, {
@@ -775,12 +823,14 @@ class MonacoController {
     return setDecorations(decorations);
   }
 
-  /// Clear all decorations
+  /// Removes all decorations set by this controller.
   Future<void> clearDecorations() => setDecorations(const []);
 
   // --- MARKERS (DIAGNOSTICS) ---
 
-  /// Set markers (diagnostics) in the editor
+  /// Sets the diagnostics (errors, warnings, hints) for the editor.
+  ///
+  /// [owner] is a string identifier for the source of these markers.
   Future<void> setMarkers(
     List<MarkerData> markers, {
     String owner = 'flutter',
@@ -791,7 +841,7 @@ class MonacoController {
     );
   }
 
-  /// Set error markers
+  /// Convenience method to set error markers.
   Future<void> setErrorMarkers(
     List<MarkerData> errors, {
     String owner = 'flutter-errors',
@@ -799,7 +849,7 @@ class MonacoController {
     await setMarkers(errors, owner: owner);
   }
 
-  /// Set warning markers
+  /// Convenience method to set warning markers.
   Future<void> setWarningMarkers(
     List<MarkerData> warnings, {
     String owner = 'flutter-warnings',
@@ -807,12 +857,12 @@ class MonacoController {
     await setMarkers(warnings, owner: owner);
   }
 
-  /// Clear all markers
+  /// Clears all markers for the specified [owner].
   Future<void> clearMarkers({String owner = 'flutter'}) async {
     await setMarkers([], owner: owner);
   }
 
-  /// Clear all markers from all owners
+  /// Clears all markers from common owners ('flutter', 'flutter-errors', 'flutter-warnings').
   Future<void> clearAllMarkers() async {
     await Future.wait([
       clearMarkers(owner: 'flutter'),
@@ -838,7 +888,7 @@ class MonacoController {
     if (matches == null || matches.isEmpty) return [];
 
     return matches
-        .map((match) => tryToMap<String, dynamic>(match))
+        .map((match) => tryConvertToMap<String, dynamic>(match))
         .where((map) => map != null)
         .map((map) => FindMatch.fromJson(map!))
         .toList();
@@ -898,7 +948,7 @@ class MonacoController {
     final result = await _executeJavaScript<String>(script);
 
     // Enhanced URI conversion with fallback
-    final createdUri = result != null ? tryToUri(result) : null;
+    final createdUri = result != null ? tryConvertToUri(result) : null;
     return createdUri ?? defaultUri ?? Uri.parse('file:///untitled');
   }
 
@@ -929,7 +979,11 @@ class MonacoController {
     if (list == null || list.isEmpty) return [];
 
     // Convert each item to URI and filter out nulls
-    return list.map(tryToUri).where((uri) => uri != null).cast<Uri>().toList();
+    return list
+        .map(tryConvertToUri)
+        .where((uri) => uri != null)
+        .cast<Uri>()
+        .toList();
   }
 
   // --- ADDITIONAL HELPER METHODS ---

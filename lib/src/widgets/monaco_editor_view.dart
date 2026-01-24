@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_helper_utils/flutter_helper_utils.dart';
 import 'package:flutter_monaco/flutter_monaco.dart';
 
 /// An enumeration representing the connection state of the Monaco Editor.
@@ -17,50 +16,26 @@ enum _ConnectionState {
   error,
 }
 
-/// {@template flutter_monaco.editor.controller}
-/// The controller for this editor instance.
+/// A widget that renders a Monaco Editor instance.
 ///
-/// If a controller is not provided, one will be created and managed internally
-/// by this widget. The internally created controller can be accessed via the
-/// [onReady] callback.
+/// This widget manages the lifecycle of the underlying WebView and the [MonacoController].
+/// It handles initialization, resizing, and exposes callbacks for editor events.
 ///
-/// **Warning**: If you provide your own controller, you are responsible for
-/// its lifecycle, including calling `dispose()` when it's no longer needed.
-/// {@endtemplate}
-///
-/// {@template flutter_monaco.editor.initialValue}
-/// The initial text content to be loaded into the editor.
-///
-/// This value is only used when the widget is first initialized or when the
-/// [controller] instance is changed. Subsequent changes to this property
-/// will be ignored. To update the content programmatically after initialization,
-/// use the methods available on the [MonacoController].
-/// {@endtemplate}
-///
-/// Highly customizable Monaco Editor widget for Flutter.
-///
-/// This widget provides a comprehensive API with sensible defaults, allowing for
-/// both simple and advanced use cases. It manages the editor's lifecycle,
-/// offers pluggable UI for loading and error states, and includes an optional,
-/// performance-optimized status bar.
+/// ### Behavior
+/// * **Initialization**: Displays [loadingBuilder] (or a spinner) until the editor is ready.
+/// * **Updates**: Rebuilds when [options] change, applying the new configuration dynamically.
+/// * **Error Handling**: Displays [errorBuilder] (or an error message) if initialization fails.
 ///
 /// ### Example
 ///
 /// ```dart
 /// MonacoEditor(
+///   initialValue: 'print("Hello World");',
 ///   options: EditorOptions(
-///     language: MonacoLanguage.typescript,
+///     language: MonacoLanguage.python,
 ///     theme: MonacoTheme.vsDark,
-///     minimap: false,
 ///   ),
-///   initialValue: 'console.log("Hello, Monaco!");',
-///   onReady: (controller) {
-///     print('Editor is ready!');
-///     // You can now use the controller to interact with the editor.
-///   },
-///   onContentChanged: (value) {
-///     print('Content changed: $value');
-///   },
+///   onContentChanged: (value) => print('New content: $value'),
 /// )
 /// ```
 class MonacoEditor extends StatefulWidget {
@@ -94,7 +69,10 @@ class MonacoEditor extends StatefulWidget {
     this.constraints,
   });
 
-  /// {@macro flutter_monaco.editor.controller}
+  /// The controller that manages the editor instance.
+  ///
+  /// If provided, you are responsible for disposing of it.
+  /// If `null`, a controller is created and managed internally by this widget.
   final MonacoController? controller;
 
   /// Test-only hook to supply a controller factory when this widget
@@ -102,94 +80,97 @@ class MonacoEditor extends StatefulWidget {
   @visibleForTesting
   final Future<MonacoController> Function()? controllerFactory;
 
-  /// {@macro flutter_monaco.editor.initialValue}
+  /// The initial content to load into the editor.
+  ///
+  /// Applied only when the editor is first created. To update content dynamically,
+  /// use [MonacoController.setValue].
   final String? initialValue;
 
-  /// Configuration options for the Monaco Editor instance.
+  /// Configuration options for the editor (theme, language, font size, etc.).
   ///
-  /// The editor will be updated if this object changes.
-  /// See [EditorOptions] for a full list of available settings.
+  /// Changing this property will dynamically update the editor instance.
   final EditorOptions options;
 
-  /// An optional text range to select after the [initialValue] is set.
+  /// The text range to select immediately after initialization.
   final Range? initialSelection;
 
-  /// If `true`, focuses the editor as soon as it becomes ready.
+  /// If `true`, the editor requests focus as soon as it becomes ready.
   final bool autofocus;
 
-  /// Custom CSS to inject into the editor's web view.
+  /// CSS injected into the editor's page (e.g., `@font-face` rules).
   ///
-  /// This is particularly useful for defining `@font-face` rules to load
-  /// custom fonts for the editor.
+  /// Changing this property triggers a full reload of the editor.
   final String? customCss;
 
-  /// If `true`, allows the WebView to load fonts from CDN sources (`https:`).
+  /// If `true`, allows the editor to load fonts from remote URLs.
   ///
-  /// Defaults to `false` for a stricter Content Security Policy (CSP).
+  /// **Security Note**: This enables network requests from the WebView.
+  /// Changing this property triggers a full reload.
   final bool allowCdnFonts;
 
-  /// An optional timeout for the editor to report that it is ready.
-  ///
-  /// If the editor fails to initialize within this duration, an error
-  /// state will be triggered.
+  /// The maximum duration to wait for the editor to initialize before showing an error.
   final Duration? readyTimeout;
 
-  /// A callback invoked when the editor is fully initialized and ready.
+  /// Callback invoked when the editor is fully initialized and ready.
   ///
-  /// The [MonacoController] for the editor instance is passed to this callback,
-  /// whether it was provided externally or created internally.
+  /// Provides the [MonacoController] for interaction.
   final ValueChanged<MonacoController>? onReady;
 
-  /// A callback invoked whenever the content of the editor changes.
+  /// Callback invoked when the text content changes.
+  ///
+  /// This is debounced by [contentDebounce] unless it's a "flush" event (e.g., `setValue`).
   final ValueChanged<String>? onContentChanged;
 
-  /// Raw signal from Monaco: was this a flush change?
+  /// Callback invoked for every content change signal from Monaco.
+  ///
+  /// The boolean argument is `true` if the change was a "flush" (full replacement).
   final ValueChanged<bool>? onRawContentChanged;
 
-  /// If true, only call [onContentChanged] on flush events.
+  /// If `true`, [onContentChanged] is only called for "flush" events, ignoring typing.
   final bool fullTextOnFlushOnly;
 
-  /// Debounce duration for non-flush text updates.
+  /// The delay before [onContentChanged] is triggered after the user stops typing.
   final Duration contentDebounce;
 
-  /// A callback invoked whenever the editor's selection changes.
+  /// Callback invoked when the cursor selection changes.
   final ValueChanged<Range?>? onSelectionChanged;
 
-  /// Callbacks invoked when the editor gains or loses focus.
+  /// Callback invoked when the editor gains focus.
   final VoidCallback? onFocus;
 
-  /// A callback invoked when the editor loses focus.
+  /// Callback invoked when the editor loses focus.
   final VoidCallback? onBlur;
 
-  /// A callback that provides live statistics from the editor, such as
-  /// cursor position, line count, and selection details.
+  /// Callback for receiving real-time editor statistics (cursor position, line count).
   final ValueChanged<LiveStats>? onLiveStats;
 
-  /// A builder for the widget to display while the editor is loading.
-  /// If `null`, a default circular progress indicator is shown.
+  /// Builder for the widget displayed while the editor is initializing.
+  ///
+  /// Defaults to a [CircularProgressIndicator].
   final WidgetBuilder? loadingBuilder;
 
-  /// A builder for the widget to display when an initialization error occurs.
+  /// Builder for the widget displayed if initialization fails.
+  ///
+  /// Defaults to an error icon and retry button.
   final Widget Function(BuildContext context, Object error, StackTrace? st)?
       errorBuilder;
 
-  /// If `true`, shows a status bar at the bottom of the editor.
+  /// If `true`, displays a status bar with line/column info at the bottom.
   final bool showStatusBar;
 
-  /// A builder to create a custom status bar widget.
-  /// If provided, this overrides the default status bar.
+  /// Builder for a custom status bar widget.
   final Widget Function(BuildContext context, LiveStats stats)?
       statusBarBuilder;
 
-  /// The background color for the container behind the editor's WebView.
+  /// The background color of the WebView container.
   ///
-  /// Defaults to a theme-appropriate color (`#1E1E1E` for dark, `white` for light).
+  /// Visible while the editor is loading or if the editor has padding.
   final Color? backgroundColor;
 
-  /// Optional padding around the editor container.
+  /// Padding applied around the editor WebView.
   final EdgeInsetsGeometry? padding;
 
-  /// Optional constraints for the editor container.
+  /// Constraints applied to the editor container.
   final BoxConstraints? constraints;
 
   /// Creates the mutable state for this widget.
@@ -404,7 +385,7 @@ class _MonacoEditorState extends State<MonacoEditor> {
     _contentSub?.cancel();
     _contentSub = null;
 
-    _contentSub = _controller!.onContentChanged.listen((isFlush) async {
+    _contentSub = _controller!.onContentChanged.listen((isFlush) {
       // 1) Always surface raw signal if requested.
       widget.onRawContentChanged?.call(isFlush);
 
@@ -422,12 +403,13 @@ class _MonacoEditorState extends State<MonacoEditor> {
 
       if (isFlush) {
         _contentDebounceTimer?.cancel();
-        await pullAndEmit();
+        _ignoreAsync(pullAndEmit());
         return;
       }
 
       _contentDebounceTimer?.cancel();
-      _contentDebounceTimer = Timer(widget.contentDebounce, pullAndEmit);
+      _contentDebounceTimer =
+          Timer(widget.contentDebounce, () => _ignoreAsync(pullAndEmit()));
     });
   }
 
@@ -461,8 +443,9 @@ class _MonacoEditorState extends State<MonacoEditor> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final bg = widget.backgroundColor ??
-        (context.themeData.brightness == Brightness.dark
+        (theme.brightness == Brightness.dark
             ? const Color(0xFF1E1E1E)
             : Colors.white);
 
@@ -585,7 +568,7 @@ class _MonacoStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = context.themeData;
+    final theme = Theme.of(context);
     final style = theme.textTheme.bodySmall ?? const TextStyle(fontSize: 12);
 
     return ValueListenableBuilder<LiveStats>(
@@ -604,7 +587,7 @@ class _MonacoStatusBar extends StatelessWidget {
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surface.setOpacity(0.95),
+            color: theme.colorScheme.surface.withValues(alpha: 0.95),
             border:
                 Border(top: BorderSide(color: theme.dividerColor, width: 0.5)),
           ),
@@ -645,7 +628,7 @@ class _DefaultError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = context.themeData;
+    final theme = Theme.of(context);
     final style = theme.textTheme.bodyMedium;
 
     return Center(

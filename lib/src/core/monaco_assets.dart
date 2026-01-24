@@ -1,22 +1,60 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_monaco/src/core/io_export.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-/// Monaco asset manager - Single source of truth for all Monaco-related assets
+/// Manages Monaco Editor assets across all platforms.
+///
+/// This class is the single source of truth for Monaco asset locations, versions,
+/// and extraction. It handles:
+///
+/// - **Asset extraction:** Copies bundled Monaco files to app support directory
+///   on native platforms for WebView access.
+/// - **Version management:** Tracks Monaco version and re-extracts on updates.
+/// - **HTML generation:** Creates platform-specific HTML with correct paths
+///   and Content-Security-Policy headers.
+/// - **Caching:** Avoids redundant extraction and HTML generation.
+///
+/// ### Platform Behavior
+///
+/// - **Native (Android/iOS/macOS/Windows):** Assets are extracted from the app
+///   bundle to the application support directory on first use. A sentinel file
+///   tracks the version to detect when re-extraction is needed.
+/// - **Web:** Assets are served directly from the `assets/` directory. No
+///   extraction is needed.
+///
+/// ### Usage
+///
+/// ```dart
+/// // Ensure assets are ready before using Monaco
+/// await MonacoAssets.ensureReady();
+///
+/// // Get the HTML file path for a specific configuration
+/// final htmlPath = await MonacoAssets.indexHtmlPath(cacheKey: options.hashCode);
+/// ```
+///
+/// See also:
+/// - [MonacoController] which calls [ensureReady] during initialization.
+/// - [generateIndexHtml] for HTML generation details.
 class MonacoAssets {
-  /// The base directory of the Monaco Editor assets.
+  /// The Flutter asset path where Monaco Editor files are bundled.
+  ///
+  /// This path is relative to the package root and used for both web asset
+  /// serving and native asset extraction.
   static const String assetBaseDir = 'packages/flutter_monaco/assets/monaco';
 
-  /// The cache subdirectory for the Monaco Editor assets.
+  /// Subdirectory name within application support for extracted assets.
   static const String _cacheSubDir = 'monaco_editor_cache';
 
   static const String _htmlFileName = 'index.html';
 
-  /// The version of the Monaco Editor assets embedded in the package.
+  /// The Monaco Editor version bundled with this package.
+  ///
+  /// When this version changes, [ensureReady] will re-extract assets on
+  /// native platforms to ensure the correct version is used.
   static const String monacoVersion = '0.54.0';
 
   static Completer<void>? _initCompleter;
@@ -24,7 +62,38 @@ class MonacoAssets {
   // HTML cache to avoid regenerating the same HTML multiple times
   static final Map<int, String> _htmlCache = {};
 
-  /// Ensures Monaco assets are ready. Thread-safe with re-entrant protection.
+  /// Ensures Monaco assets are extracted and ready for use on native platforms.
+  ///
+  /// This method performs the following checks and operations:
+  ///
+  /// 1. **Existence check:** Verifies `loader.js` exists in the target directory
+  /// 2. **Version check:** Compares sentinel file content with [monacoVersion]
+  /// 3. **Extraction:** Copies all assets from the bundle if missing or outdated
+  ///
+  /// ### Thread Safety
+  ///
+  /// This method is idempotent and thread-safe. Multiple concurrent calls
+  /// will share the same [Completer], ensuring extraction happens only once.
+  /// Subsequent calls return immediately if assets are already ready.
+  ///
+  /// ### Web Platform
+  ///
+  /// On web, this method completes immediately without any file operations,
+  /// as assets are served directly from the web server.
+  ///
+  /// ### Error Handling
+  ///
+  /// Throws [StateError] if asset extraction fails (e.g., insufficient disk
+  /// space or permission issues). The error includes details about which
+  /// files failed to copy.
+  ///
+  /// ### Example
+  ///
+  /// ```dart
+  /// // Call before creating MonacoController
+  /// await MonacoAssets.ensureReady();
+  /// final controller = await MonacoController.create();
+  /// ```
   static Future<void> ensureReady() async {
     if (_initCompleter != null) return _initCompleter!.future;
 
@@ -63,7 +132,27 @@ class MonacoAssets {
     return completer.future;
   }
 
-  /// Get the path to the HTML file
+  /// Returns the path to the Monaco HTML file for a given configuration.
+  ///
+  /// The [cacheKey] should be derived from configuration options that affect
+  /// HTML generation (e.g., `Object.hash(customCss, allowCdnFonts)`). This
+  /// enables caching multiple HTML variants for different configurations.
+  ///
+  /// ### Native Platforms
+  ///
+  /// Ensures assets are extracted via [ensureReady], then returns a path
+  /// like: `{appSupport}/monaco_editor_cache/monaco-{version}/monaco_{key}.html`
+  ///
+  /// The actual HTML file is created lazily by the WebView controller when
+  /// it calls [generateIndexHtml].
+  ///
+  /// ### Web Platform
+  ///
+  /// Returns the static asset path directly:
+  /// `assets/packages/flutter_monaco/assets/monaco/index.html`
+  ///
+  /// Note that on web, the [cacheKey] is ignored since HTML is generated
+  /// dynamically as a blob URL rather than loaded from this path.
   static Future<String> indexHtmlPath({required int cacheKey}) async {
     if (kIsWeb) {
       return 'assets/packages/flutter_monaco/assets/monaco/index.html';
@@ -81,8 +170,44 @@ class MonacoAssets {
     return _htmlCache[cacheKey] = p.join(targetDir, 'monaco_$cacheKey.html');
   }
 
-  /// Get information about extracted Monaco assets
+  /// Returns diagnostic information about extracted Monaco assets.
+  ///
+  /// This method is useful for debugging asset extraction issues or
+  /// displaying version information in an about dialog.
+  ///
+  /// ### Returned Fields
+  ///
+  /// - `exists` (bool): Whether the asset directory exists
+  /// - `path` (String): Absolute path to the asset directory
+  /// - `version` (String): The [monacoVersion] constant
+  /// - `fileCount` (int): Number of files in the directory (if exists)
+  /// - `totalSize` (int): Total size in bytes (if exists)
+  /// - `totalSizeMB` (String): Formatted size in megabytes (if exists)
+  /// - `generatedHtmlCount` (int): Number of generated HTML files found
+  ///
+  /// ### Web Platform
+  ///
+  /// On web, assets are served directly from the web server, so this returns
+  /// limited information without file system access.
+  ///
+  /// ### Example
+  ///
+  /// ```dart
+  /// final info = await MonacoAssets.assetInfo();
+  /// print('Monaco ${info['version']} - ${info['totalSizeMB']} MB');
+  /// ```
   static Future<Map<String, dynamic>> assetInfo() async {
+    // Web platform doesn't use extracted assets
+    if (kIsWeb) {
+      return {
+        'exists': true,
+        'path': 'assets/$assetBaseDir',
+        'version': monacoVersion,
+        'platform': 'web',
+        'note': 'Assets served directly from web server, no extraction needed.',
+      };
+    }
+
     final targetDir = await _getTargetDir();
     final directory = Directory(targetDir);
 
@@ -95,17 +220,19 @@ class MonacoAssets {
     }
 
     // Count files and calculate size
-    var fileCount = 0;
-    var totalSize = 0;
-    var hasHtmlFile = false;
+    int fileCount = 0;
+    int totalSize = 0;
+    int generatedHtmlCount = 0;
 
     await for (final entity in directory.list(recursive: true)) {
       if (entity is File) {
         fileCount++;
         totalSize += await entity.length();
 
-        if (p.basename(entity.path) == _htmlFileName) {
-          hasHtmlFile = true;
+        // Count generated HTML files (monaco_*.html pattern)
+        final fileName = p.basename(entity.path);
+        if (fileName.startsWith('monaco_') && fileName.endsWith('.html')) {
+          generatedHtmlCount++;
         }
       }
     }
@@ -117,13 +244,48 @@ class MonacoAssets {
       'fileCount': fileCount,
       'totalSize': totalSize,
       'totalSizeMB': (totalSize / 1024 / 1024).toStringAsFixed(2),
-      'hasHtmlFile': hasHtmlFile,
-      'htmlPath': p.join(targetDir, _htmlFileName),
+      'generatedHtmlCount': generatedHtmlCount,
     };
   }
 
-  /// Clean up all Monaco assets
+  /// Deletes all extracted Monaco assets and resets initialization state.
+  ///
+  /// This method:
+  /// 1. Recursively deletes the Monaco asset directory
+  /// 2. Clears the in-memory HTML cache
+  /// 3. Resets [_initCompleter] so [ensureReady] will re-extract
+  ///
+  /// ### Use Cases
+  ///
+  /// - **Corruption recovery:** If Monaco fails to load, clearing and
+  ///   re-extracting may fix the issue.
+  /// - **Storage cleanup:** Frees ~5-10MB of disk space.
+  /// - **Development:** Forces fresh extraction after updating Monaco assets.
+  ///
+  /// ### Web Platform
+  ///
+  /// On web, this method only clears the in-memory HTML cache since assets
+  /// are served directly from the web server and cannot be deleted.
+  ///
+  /// ### Example
+  ///
+  /// ```dart
+  /// // Clear corrupted assets and re-extract
+  /// await MonacoAssets.clearCache();
+  /// await MonacoAssets.ensureReady();
+  /// ```
+  ///
+  /// **Note:** Any existing [MonacoController] instances will become invalid
+  /// after clearing. Dispose and recreate them after calling this method.
   static Future<void> clearCache() async {
+    // On web, only clear in-memory caches (no file system access)
+    if (kIsWeb) {
+      _initCompleter = null;
+      _htmlCache.clear();
+      debugPrint('[MonacoAssets] Web cache cleared (in-memory only)');
+      return;
+    }
+
     final targetDir = await _getTargetDir();
     final directory = Directory(targetDir);
 
@@ -162,8 +324,11 @@ class MonacoAssets {
     final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
     final monacoAssets = manifest
         .listAssets()
-        .where((key) => key.startsWith(assetBaseDir))
+        .where((key) => key.startsWith(
+            '$assetBaseDir/')) // Trailing slash prevents matching similar prefixes
         .where((key) => !key.endsWith('.DS_Store')) // Skip macOS metadata files
+        .where((key) => !key
+            .endsWith('/$_htmlFileName')) // Exclude index.html from copy list
         .toList();
 
     debugPrint(
@@ -174,9 +339,9 @@ class MonacoAssets {
     var copiedCount = 0;
     for (final assetKey in monacoAssets) {
       try {
-        // Calculate relative path (skip index.html from assets if it exists)
+        // Calculate relative path within the monaco directory
         final relativePath = assetKey.substring('$assetBaseDir/'.length);
-        if (relativePath.isEmpty || relativePath == _htmlFileName) continue;
+        if (relativePath.isEmpty) continue;
 
         // Create target file path
         final targetFile = File(p.join(targetDir, relativePath));
@@ -221,20 +386,61 @@ class MonacoAssets {
         '[MonacoAssets] Sentinel file written for version $monacoVersion');
   }
 
-  /// Generate the index.html file for the Monaco editor
+  /// Generates the HTML document that hosts the Monaco Editor.
+  ///
+  /// This method creates a complete HTML page with:
+  /// - Monaco loader and editor initialization
+  /// - Platform-specific worker shims (blob URLs for WKWebView, etc.)
+  /// - JavaScript bridge (`window.flutterMonaco`) for Flutter communication
+  /// - Content-Security-Policy headers for security
+  /// - Optional custom CSS injection
+  ///
+  /// ### Parameters
+  ///
+  /// - [vsPath]: The path to the Monaco `vs/` directory. This varies by platform:
+  ///   - **Windows:** Absolute `file://` URL (e.g., `file:///C:/path/min/vs`)
+  ///   - **macOS/iOS:** Relative path (e.g., `min/vs`)
+  ///   - **Web:** Full URL resolved from base (e.g., `http://host/assets/.../min/vs`)
+  ///
+  /// - [isWindows]: Set `true` for Windows to configure WebView2 communication
+  ///   via `chrome.webview.postMessage`.
+  ///
+  /// - [isIosOrMacOS]: Set `true` for Apple platforms to enable blob URL worker
+  ///   shims required by WKWebView's `file://` restrictions.
+  ///
+  /// - [isWeb]: Set `true` for web platform to use iframe `postMessage` and
+  ///   dynamic loader script injection.
+  ///
+  /// - [customCss]: Optional CSS string injected into a `<style>` tag. Use for
+  ///   custom fonts (`@font-face`), theme overrides, or UI tweaks.
+  ///
+  /// - [allowCdnFonts]: If `true`, relaxes CSP to allow `https:` in `style-src`
+  ///   and `font-src`, enabling CDN-hosted fonts. **Security note:** This allows
+  ///   network requests from the editor.
+  ///
+  /// ### The `flutterMonaco` Bridge
+  ///
+  /// The generated HTML defines `window.flutterMonaco` with methods like:
+  /// - `getValue()`, `setValue(v)` - Content management
+  /// - `setTheme(t)`, `setLanguage(l)` - Editor configuration
+  /// - `getSelection()`, `setSelection(r)` - Selection handling
+  /// - `findMatches(q, opts)`, `replaceMatches(q, r, opts)` - Search
+  /// - `registerCompletionSource(cfg)` - Autocompletion
+  ///
+  /// Events are sent to Flutter via `flutterChannel.postMessage(json)`.
+  ///
+  /// See also:
+  /// - [MonacoController] which calls the `flutterMonaco` methods.
+  /// - [MonacoBridge] which receives events from the HTML.
   static String generateIndexHtml(
     String vsPath, {
     bool isWindows = false,
     bool isIosOrMacOS = false,
     bool isWeb = false,
+    String? messageToken,
     String? customCss,
     bool allowCdnFonts = false,
   }) {
-    assert(
-      isWindows || isIosOrMacOS || isWeb,
-      'At least one of isWindows, isIosOrMacOS, or isWeb must be true',
-    );
-
     // Platform-specific initialization scripts
     String platformScript = '';
 
@@ -252,6 +458,27 @@ class MonacoAssets {
   window.flutterChannel = {
     postMessage: function(msg) {
       window.parent.postMessage(msg, '*');
+    }
+  };
+  window.flutterMonacoToken = '${messageToken ?? ''}';
+  window.flutterMonacoPostMessage = function(message) {
+    var token = window.flutterMonacoToken;
+    if (typeof message !== 'string') {
+      if (token && message && typeof message === 'object') {
+        message._flutterToken = token;
+      }
+      message = JSON.stringify(message);
+    } else {
+      try {
+        var parsed = JSON.parse(message);
+        if (parsed && typeof parsed === 'object') {
+          if (token) parsed._flutterToken = token;
+          message = JSON.stringify(parsed);
+        }
+      } catch (_) {}
+    }
+    if (window.flutterChannel && window.flutterChannel.postMessage) {
+      window.flutterChannel.postMessage(message);
     }
   };
   console.log('[Web Init] flutterChannel created successfully');
@@ -367,7 +594,9 @@ class MonacoAssets {
       };
       loaderScript.onerror = function() {
         console.error('[Monaco HTML] FATAL: loader.js FAILED TO LOAD.');
-        if (window.flutterChannel) {
+        if (window.flutterMonacoPostMessage) {
+          window.flutterMonacoPostMessage({ event: 'error', message: 'Failed to load Monaco loader.js' });
+        } else if (window.flutterChannel) {
           window.flutterChannel.postMessage(JSON.stringify({ event: 'error', message: 'Failed to load Monaco loader.js' }));
         }
       };
@@ -399,6 +628,10 @@ class MonacoAssets {
             console.log('[Monaco] SUCCESS: editor.main.js has loaded. Initializing editor...');
 
             function postMessageToFlutter(message) {
+              if (window.flutterMonacoPostMessage) {
+                window.flutterMonacoPostMessage(message);
+                return;
+              }
               if (typeof message !== 'string') {
                 message = JSON.stringify(message);
               }
@@ -444,7 +677,7 @@ class MonacoAssets {
 
                 // Events -> Flutter
                 const post = (event, payload) =>
-                  window.flutterChannel?.postMessage(serialize({ event, ...payload }));
+                  postMessageToFlutter({ event, ...payload });
 
                 E().onDidChangeModelContent(e => post('contentChanged', { isFlush: e.isFlush }));
                 E().onDidChangeCursorSelection(e => post('selectionChanged', {
@@ -645,21 +878,22 @@ class MonacoAssets {
                     };
                   },
                   
-                  // Dirty tracking
-                  _hasBaseline: false,
-                  _baselineVersionId: null,
-                  _markBaseline() {
-                    const m = E().getModel();
-                    if (m) {
-                      this._baselineVersionId = m.getAlternativeVersionId();
-                      this._hasBaseline = true;
+                  // Dirty tracking (per-model baselines keyed by URI)
+                  _baselines: new Map(),
+                  _markBaseline(model) {
+                    const m = model || E().getModel();
+                    if (m && m.uri) {
+                      this._baselines.set(m.uri.toString(), m.getAlternativeVersionId());
                     }
                   },
                   hasUnsavedChanges: () => {
                     const m = E().getModel();
-                    if (!m) return false;
-                    if (!window.flutterMonaco._hasBaseline) window.flutterMonaco._markBaseline();
-                    return m.getAlternativeVersionId() !== window.flutterMonaco._baselineVersionId;
+                    if (!m || !m.uri) return false;
+                    const uri = m.uri.toString();
+                    if (!window.flutterMonaco._baselines.has(uri)) {
+                      window.flutterMonaco._markBaseline(m);
+                    }
+                    return m.getAlternativeVersionId() !== window.flutterMonaco._baselines.get(uri);
                   },
                   markSaved: () => window.flutterMonaco._markBaseline(),
 
@@ -742,7 +976,7 @@ class MonacoAssets {
                             triggerKind: context?.triggerKind ?? null,
                             triggerCharacter: context?.triggerCharacter ?? null,
                           };
-                          window.flutterChannel?.postMessage(JSON.stringify(payload));
+                          postMessageToFlutter(payload);
 
                           token?.onCancellationRequested?.(() => {
                             delete completion.resolvers[reqId];
@@ -828,7 +1062,7 @@ class MonacoAssets {
           },
           function (error) {
             console.error('[Monaco] FATAL: require() failed to load editor.main.js. Error:', error);
-            ${isWeb ? "if (window.flutterChannel) window.flutterChannel.postMessage(JSON.stringify({ event: 'error', message: 'Failed to load editor.main: ' + error }));" : ''}
+            ${isWeb ? "if (window.flutterMonacoPostMessage) window.flutterMonacoPostMessage({ event: 'error', message: 'Failed to load editor.main: ' + error });" : ''}
           }
         );
       } catch (e) {
