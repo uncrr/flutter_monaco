@@ -154,7 +154,11 @@ class MonacoController {
           }
           controller._queuedCompletionSources.clear();
         } catch (e, st) {
-          if (controller != null && !controller._onReady.isCompleted) {
+          // Only complete _onReady with error on web, where we return the
+          // controller before readyFuture completes. On native, we await
+          // readyFuture and throw before returning, so no one listens to
+          // _onReady - completing it with an error would be unhandled.
+          if (kIsWeb && controller != null && !controller._onReady.isCompleted) {
             controller._onReady.completeError(e, st);
           }
           rethrow;
