@@ -47,6 +47,7 @@ dev_dependencies:
 flutter:
   assets:
     - assets/github.svg
+    - pubspec.yaml
     - assets/monaco/
     - assets/monaco/min/
     - assets/monaco/min/vs/

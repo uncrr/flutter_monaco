@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_monaco/flutter_monaco.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 final MonacoRouteObserver _webDemoRouteObserver = MonacoRouteObserver();
 
@@ -38,6 +39,7 @@ class _WebDemoState extends State<WebDemo> {
   bool _minimap = true;
   bool _wordWrap = false;
   String _output = '';
+  String _appVersion = 'v-';
 
   // Track content per file (to preserve edits when switching)
   final Map<int, String> _fileContents = {};
@@ -288,6 +290,38 @@ MonacoEditor(
     ),
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    _loadAppVersion();
+  }
+
+  Future<void> _loadAppVersion() async {
+    String? packageVersion;
+    String? appVersion;
+
+    try {
+      final pubspec =
+          await rootBundle.loadString('packages/flutter_monaco/pubspec.yaml');
+      final match =
+          RegExp(r'^version:\s*([^\s]+)', multiLine: true).firstMatch(pubspec);
+      packageVersion = match?.group(1);
+    } catch (_) {
+      packageVersion = null;
+    }
+
+    try {
+      final info = await PackageInfo.fromPlatform();
+      appVersion = info.version;
+    } catch (_) {
+      appVersion = null;
+    }
+
+    final resolved = packageVersion ?? appVersion;
+    if (!mounted) return;
+    setState(() => _appVersion = resolved != null ? 'v$resolved' : 'v-');
+  }
+
   /// Called when MonacoEditor is ready - we get the controller here
   void _onEditorReady(MonacoController controller) {
     setState(() => _controller = controller);
@@ -467,12 +501,12 @@ MonacoEditor(
                   color: const Color(0xFF0098FF).withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(4),
                 ),
-                child: const Row(
+                child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.code, color: Color(0xFF0098FF), size: 18),
-                    SizedBox(width: 8),
-                    Text(
+                    const Icon(Icons.code, color: Color(0xFF0098FF), size: 18),
+                    const SizedBox(width: 8),
+                    const Text(
                       'flutter_monaco',
                       style: TextStyle(
                         color: Colors.white,
@@ -480,10 +514,10 @@ MonacoEditor(
                         fontSize: 14,
                       ),
                     ),
-                    SizedBox(width: 8),
+                    const SizedBox(width: 8),
                     Text(
-                      'v1.4.0',
-                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                      _appVersion,
+                      style: const TextStyle(color: Colors.white54, fontSize: 12),
                     ),
                   ],
                 ),
